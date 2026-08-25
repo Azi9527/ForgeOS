@@ -136,9 +136,9 @@ python -m forgeos.release_artifacts --project-root forgeos --dist forgeos/dist -
 ```
 
 Production tags must exactly match `forgeos-v<package-version>`. The release workflow generates
-SHA-256 checksums and an SPDX SBOM, records GitHub build-provenance attestations, publishes through
-PyPI Trusted Publishing, and attaches release evidence to GitHub. A protected `pypi` environment
-with a human approver is required before the first production release.
+SHA-256 checksums and an SPDX SBOM, records GitHub build-provenance attestations, and attaches
+release evidence to GitHub. PyPI and TestPyPI publishing are optional manual workflow targets;
+tagged V1 releases do not publish to either package index.
 
 N4 adds explicit execution-attempt budgets, durable human cancellation,
 startup recovery reconciliation, evidence integrity scans, and additive

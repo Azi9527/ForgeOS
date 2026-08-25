@@ -14,6 +14,7 @@ on:
         options:
           - none
           - testpypi
+          - pypi
 
 permissions:
   contents: read
@@ -120,7 +121,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_target == 'pypi'
     needs: build-release
     runs-on: ubuntu-latest
     environment:
@@ -147,7 +148,7 @@ jobs:
   github-release:
     name: Publish GitHub release
     if: github.ref_type == 'tag'
-    needs: [build-release, publish-pypi]
+    needs: build-release
     runs-on: ubuntu-latest
     permissions:
       contents: write

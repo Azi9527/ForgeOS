@@ -4,26 +4,26 @@ Date: 2026-08-25 (Asia/Shanghai)
 
 ## 1. Status
 
-**Local release candidate: PASS. Remote distribution: BLOCKED ON REVIEW/CI/AUTH.**
+**ForgeOS V1 release candidate: PASS. GitHub distribution: RELEASED. PyPI: DEFERRED.**
 
-The locally rebuilt `forgeos-harness` 0.2.0 wheel and source distribution pass inspection. The
-candidate is pushed to the private ForgeOS repository and opened as PR #1. The GitHub CLI
-credential expired after the push, the corrected CI run is queued behind inherited upstream Codex
-workflows, and no attestation, tag, GitHub Release, TestPyPI upload, or PyPI upload is claimed.
+PR #1 was reviewed and merged as `0706c26b9100e55c8ba34f1d8715b6997a1ede62`. All 14 ForgeOS CI
+checks passed. Tag `forgeos-v0.2.0` points to that merge commit. The public GitHub Release contains
+the CI-built wheel, sdist, `SHA256SUMS`, and SPDX SBOM; GitHub provenance and SBOM attestations
+verify successfully. V1 intentionally defers PyPI publication.
 
 ## 2. Repository baseline
 
 | Field | Result |
 | --- | --- |
-| Branch | `forgeos/r1-v0.2.0` |
+| Branch | `main` release plus `forgeos/r1-optional-pypi` policy follow-up |
 | Candidate commit before review fixes | `e75899defefaf8167ba379b9544f857e013ca0ee` |
 | Upstream base | `068c49f075cf287a1fe7d1ee36cf005efac922e7` |
 | Upstream | `https://github.com/openai/codex.git` |
 | Origin | `https://github.com/Azi9527/ForgeOS.git` |
-| Pull request | `https://github.com/Azi9527/ForgeOS/pull/1` |
+| Pull request | `https://github.com/Azi9527/ForgeOS/pull/1` (merged) |
 | Git identity | Configured locally |
 | Git signing | No local signing key/tool configured |
-| GitHub CLI | Account `Azi9527` was authenticated for setup; credential later expired |
+| GitHub CLI | Account `Azi9527` authenticated |
 | Local evidence | `.forge/` ignored and excluded from staged content |
 
 ## 3. Local verification
@@ -32,7 +32,7 @@ workflows, and no attestation, tag, GitHub Release, TestPyPI upload, or PyPI upl
 | --- | --- | --- |
 | Ruff lint | PASS | `All checks passed!` |
 | Ruff format | PASS | changed Python files formatted |
-| Pytest | PASS | 116 tests, including model-input, resume-context and OS permission regressions |
+| Pytest | PASS | 117 tests, including model-input, resume-context and Windows lock regressions |
 | JavaScript syntax | PASS | `app.js` and `operator.js` |
 | YAML parse | PASS | both ForgeOS workflow files parsed locally |
 | Wheel build | PASS | `forgeos_harness-0.2.0-py3-none-any.whl` |
@@ -45,12 +45,11 @@ workflows, and no attestation, tag, GitHub Release, TestPyPI upload, or PyPI upl
 
 ## 4. Candidate digests
 
-These local build digests are not public release digests. Tagged CI must reproduce and publish its
-own `SHA256SUMS`:
+Tagged CI published these release digests:
 
 ```text
-05d4d1d202731e543ab15bae09ad5737a0ce3e0644bf8d52d17fc284196d1216  forgeos_harness-0.2.0-py3-none-any.whl
-26a43725f9e2c9aca1164e344c2dbb7eca5d7f2dd7542d69e0c60412a380d5ef  forgeos_harness-0.2.0.tar.gz
+f93c247da8fa16d8432576acf18f25d4b8d6962ad5f36b2378f674947c318a83  forgeos_harness-0.2.0-py3-none-any.whl
+e73fddc640f7930822cb78dc973a42af5ec3fddbf230c862d73f1e6f7449b3e0  forgeos_harness-0.2.0.tar.gz
 ```
 
 ## 5. Review findings
@@ -66,29 +65,25 @@ own `SHA256SUMS`:
 2. The initial downstream import is 19,421 lines across 109 files. This exceeds the repository's
    800-line review guidance and remains an explicit P1 review exception or a stacked-PR rewrite
    decision; history has not been rewritten silently.
-3. The GitHub CLI credential expired after PR creation and must be reauthenticated before further
-   PR, environment, or release operations.
-4. The private repository inherited heavyweight upstream Codex workflows. Canceling active runs or
-   disabling those workflows requires explicit owner authorization; ForgeOS CI remains queued.
+3. GitHub CLI authentication was restored; the repository is public and ForgeOS CI is green.
+4. Inherited heavyweight upstream workflows were disabled in the ForgeOS repository by owner
+   authorization; ForgeOS CI, CLA, post-merge CI, and dependency services remain enabled.
 5. `gpg`, `cosign`, and `syft` are not installed locally. R1 uses GitHub OIDC, Sigstore-backed
    `actions/attest`, and PyPI Trusted Publishing instead of a local private key.
-6. PyPI lookup returned no matching published distribution for `forgeos-harness`, but only PyPI can
-   confirm name creation/ownership during Trusted Publisher setup.
+6. PyPI publication was removed from the tagged V1 critical path by product decision. It remains an
+   optional manual workflow target for a later distribution phase.
 7. The sole modification to an existing upstream-owned file is the registered low-risk
    `.gitignore` patch FUP-0004. No Codex Core, Agent Loop, SDK, Sandbox, Approval, MCP, Cargo, or
    Bazel file is modified.
 
-## 6. Remote gates still required
+## 6. Remote completion evidence
 
-- Reauthenticate GitHub CLI so PR labels, checks, environments, and release operations can resume.
-- Decide whether the initial-import size finding is an accepted exception or authorize a stacked-PR
-  rewrite.
-- Decide whether to cancel/disable inherited upstream Codex workflows in the ForgeOS repository.
-- Obtain review approval and green 12-cell remote Python matrix.
-- Configure protected `testpypi`/`pypi` environments and exact Trusted Publisher identity.
-- Run a TestPyPI smoke publication if desired.
-- Create and push the annotated tag `forgeos-v0.2.0` only after all gates pass.
-- Observe successful GitHub provenance/SBOM attestations, PyPI publish attestations, GitHub Release,
-  digest comparison, and clean install of the publicly hosted artifact.
-
-Until these gates pass, R1 is **locally ready but externally incomplete**.
+- Repository: `https://github.com/Azi9527/ForgeOS` (public).
+- PR: `https://github.com/Azi9527/ForgeOS/pull/1` (merged).
+- Release: `https://github.com/Azi9527/ForgeOS/releases/tag/forgeos-v0.2.0`.
+- Workflow run: `https://github.com/Azi9527/ForgeOS/actions/runs/32804934780`.
+- The tagged run's build/verify/attest job passed; the overall run stopped at the subsequently
+  deferred PyPI job. The GitHub Release was created from that retained, checksum-verified artifact.
+- Remote CI: 12 Python cells plus Operator assets and distribution gate passed.
+- Supply chain: SHA256, SPDX SBOM, GitHub build provenance and SBOM attestations verified.
+- PyPI/TestPyPI: intentionally not published in V1.

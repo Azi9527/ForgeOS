@@ -106,7 +106,7 @@ N5 已完成稳定 protocol fixtures、verified export/atomic import、package `
 
 ForgeOS V1 本地单 Agent harness 已达到 release-candidate 功能边界。下一阶段为 **R1 — V1 Release Candidate & Distribution**：配置 `origin`、提交/评审、CI matrix、tag、wheel 发布与制品签名。R1 不增加 Agent、Router、数据库或远程 Console 功能；需求中的 M5（Model Router、Agent Roles、Parallel Task、Agent Handoff）保留为 V1 之后。
 
-R1 本地发布工程已实现：3 OS × Python 3.10–3.13 CI matrix、wheel/sdist 内容门禁、SHA-256、SPDX SBOM、GitHub build provenance、TestPyPI/PyPI Trusted Publishing 和 GitHub Release workflow。正式完成仍需要仓库所有者提供/创建 ForgeOS `origin`、恢复 GitHub 身份、配置受保护 environment 与 PyPI Trusted Publisher，并让远端 CI/发布实际成功。
+R1 已完成：公开 ForgeOS `origin`、PR 评审、3 OS × Python 3.10–3.13 CI matrix、wheel/sdist 内容门禁、SHA-256、SPDX SBOM、GitHub build provenance/SBOM attestations、`forgeos-v0.2.0` tag 与 GitHub Release。V1 暂不发布 PyPI；TestPyPI/PyPI 仅保留为未来手动可选目标，不阻塞 GitHub Release。
 
 ## 7. V1 Exit Criteria
 
