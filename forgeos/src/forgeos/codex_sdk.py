@@ -66,6 +66,7 @@ class CodexTurnResult:
     duration_ms: int | None
     items: tuple[dict[str, Any], ...]
     usage: dict[str, Any] | None
+    replaced_thread_id: str | None = None
 
 
 class CodexSdkIntegrationError(RuntimeError):
@@ -178,6 +179,7 @@ class CodexSdkGateway:
         *,
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
+        allow_missing_rollout_replacement: bool = False,
     ) -> CodexTurnResult:
         """Run one turn on a new thread or resume a persisted Codex thread."""
 
@@ -193,14 +195,26 @@ class CodexSdkGateway:
                 **thread_options,
                 ephemeral=self.settings.ephemeral_threads,
             )
+            replaced_thread_id = None
         else:
-            thread = client.thread_resume(thread_id, **thread_options)
+            thread, replaced_thread_id = _resume_or_restart(
+                client,
+                thread_id,
+                resume_options=thread_options,
+                start_options=thread_options,
+                ephemeral=self.settings.ephemeral_threads,
+                allow_replacement=allow_missing_rollout_replacement,
+            )
 
         run_options: dict[str, Any] = {}
         if output_schema is not None:
             run_options["output_schema"] = output_schema
         result = thread.run(_prepare_prompt(client, prompt), **run_options)
-        return _normalize_turn_result(thread.id, result)
+        return _normalize_turn_result(
+            thread.id,
+            result,
+            replaced_thread_id=replaced_thread_id,
+        )
 
     def run_turn_controlled(
         self,
@@ -209,6 +223,7 @@ class CodexSdkGateway:
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
         developer_instructions: str | None = None,
+        allow_missing_rollout_replacement: bool = False,
         on_progress: ProgressCallback | None = None,
         on_started: TurnStartedCallback | None = None,
     ) -> CodexTurnResult:
@@ -220,23 +235,35 @@ class CodexSdkGateway:
 
         self.start()
         client = self._require_client()
+        thread_options = _thread_options(
+            self.settings,
+            developer_instructions=developer_instructions,
+        )
         if thread_id is None:
-            thread_options = _thread_options(
-                self.settings,
-                developer_instructions=developer_instructions,
-            )
             thread = client.thread_start(
                 **thread_options,
                 ephemeral=self.settings.ephemeral_threads,
             )
+            replaced_thread_id = None
         else:
-            thread = client.thread_resume(thread_id, cwd=str(self.settings.workspace))
+            thread, replaced_thread_id = _resume_or_restart(
+                client,
+                thread_id,
+                resume_options={"cwd": str(self.settings.workspace)},
+                start_options=thread_options,
+                ephemeral=self.settings.ephemeral_threads,
+                allow_replacement=allow_missing_rollout_replacement,
+            )
 
         run_options: dict[str, Any] = {}
         if output_schema is not None:
             run_options["output_schema"] = output_schema
         handle = thread.turn(_prepare_prompt(client, prompt), **run_options)
-        control = CodexTurnControl(thread_id=thread.id, handle=handle)
+        control = CodexTurnControl(
+            thread_id=thread.id,
+            handle=handle,
+            replaced_thread_id=replaced_thread_id,
+        )
         if on_started is not None:
             on_started(control)
         return _collect_controlled_result(
@@ -244,12 +271,34 @@ class CodexSdkGateway:
             control.turn_id,
             handle,
             on_progress=on_progress,
+            replaced_thread_id=replaced_thread_id,
         )
 
     def _require_client(self) -> _SdkClient:
         if self._client is None:
             raise CodexSdkIntegrationError("Codex SDK connection is not running")
         return self._client
+
+
+def _resume_or_restart(
+    client: _SdkClient,
+    thread_id: str,
+    *,
+    resume_options: dict[str, Any],
+    start_options: dict[str, Any],
+    ephemeral: bool,
+    allow_replacement: bool,
+) -> tuple[_SdkThread, str | None]:
+    """Start a replacement only when Codex confirms the rollout never existed."""
+
+    try:
+        return client.thread_resume(thread_id, **resume_options), None
+    except Exception as exc:
+        if "no rollout found for thread id" not in str(exc).lower():
+            raise
+        if not allow_replacement:
+            raise
+    return client.thread_start(**start_options, ephemeral=ephemeral), thread_id
 
 
 def _create_official_client(settings: CodexSdkSettings) -> _SdkClient:
@@ -324,7 +373,12 @@ def _prepare_prompt(client: _SdkClient, prompt: str | ModelInput) -> Any:
     return bounded
 
 
-def _normalize_turn_result(thread_id: str, result: Any) -> CodexTurnResult:
+def _normalize_turn_result(
+    thread_id: str,
+    result: Any,
+    *,
+    replaced_thread_id: str | None = None,
+) -> CodexTurnResult:
     error = getattr(result, "error", None)
     return CodexTurnResult(
         thread_id=thread_id,
@@ -337,6 +391,7 @@ def _normalize_turn_result(thread_id: str, result: Any) -> CodexTurnResult:
         duration_ms=result.duration_ms,
         items=tuple(_object_to_dict(item) for item in result.items),
         usage=_object_to_optional_dict(result.usage),
+        replaced_thread_id=replaced_thread_id,
     )
 
 
@@ -346,6 +401,7 @@ def _collect_controlled_result(
     handle: SdkTurnHandle,
     *,
     on_progress: ProgressCallback | None,
+    replaced_thread_id: str | None = None,
 ) -> CodexTurnResult:
     items: list[Any] = []
     usage: Any = None
@@ -386,6 +442,7 @@ def _collect_controlled_result(
         duration_ms=getattr(completed_turn, "duration_ms", None),
         items=tuple(_object_to_dict(item) for item in items),
         usage=_object_to_optional_dict(usage),
+        replaced_thread_id=replaced_thread_id,
     )
 
 

@@ -19,7 +19,7 @@ from .policy import PolicyEngine
 from .protocol_fixtures import ProtocolFixtureVerifier
 from .storage import ForgeStore
 
-PACKAGE_VERSION = "0.2.0"
+PACKAGE_VERSION = "0.2.1"
 
 
 class ReleaseCheckStatus(str, Enum):
@@ -168,7 +168,7 @@ class ReleaseReadinessService:
         root = files("forgeos").joinpath("web")
         missing = [
             name
-            for name in ("index.html", "app.js", "operator.js", "styles.css")
+            for name in ("index.html", "app.js", "operator.js", "pilot.js", "styles.css")
             if not root.joinpath(name).is_file()
         ]
         return (

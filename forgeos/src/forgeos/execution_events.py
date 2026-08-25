@@ -40,9 +40,16 @@ class SdkTurnHandle(Protocol):
 class CodexTurnControl:
     """Thread-safe narrow control surface for one active SDK TurnHandle."""
 
-    def __init__(self, *, thread_id: str, handle: SdkTurnHandle) -> None:
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        handle: SdkTurnHandle,
+        replaced_thread_id: str | None = None,
+    ) -> None:
         self.thread_id = thread_id
         self.turn_id = str(handle.id)
+        self.replaced_thread_id = replaced_thread_id
         self._handle = handle
         self._lock = threading.Lock()
         self._interrupt_requested = False

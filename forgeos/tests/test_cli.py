@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import forgeos.cli as cli_module
 from forgeos.cli import main
 
 
@@ -55,3 +56,29 @@ def test_cli_returns_nonzero_for_uninitialized_workspace(
 ) -> None:
     assert invoke(tmp_path, "status") == 2
     assert "not initialized" in capsys.readouterr().err
+
+
+def test_ui_open_browser_uses_exact_tokenized_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[str] = []
+
+    class FakeControl:
+        def close(self) -> None:
+            return
+
+    class FakeServer:
+        url = "http://127.0.0.1:9876/?token=exact-token"
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(cli_module, "ForgeControlService", lambda *_args, **_kwargs: FakeControl())
+    monkeypatch.setattr(cli_module, "ForgeWebServer", lambda *_args, **_kwargs: FakeServer())
+    monkeypatch.setattr(cli_module.webbrowser, "open", lambda url: opened.append(url) or True)
+
+    assert invoke(tmp_path, "ui", "--port", "0", "--open-browser") == 0
+    assert opened == [FakeServer.url]

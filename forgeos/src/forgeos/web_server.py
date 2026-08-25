@@ -7,6 +7,7 @@ import html
 import json
 import secrets
 import threading
+from collections.abc import Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -117,6 +118,7 @@ def _handler_type(control: ForgeControlService, token: str) -> type[BaseHTTPRequ
             if method == "GET" and path in {
                 "/assets/app.js",
                 "/assets/operator.js",
+                "/assets/pilot.js",
                 "/assets/styles.css",
             }:
                 name = path.rsplit("/", 1)[1]
@@ -148,6 +150,9 @@ def _handler_type(control: ForgeControlService, token: str) -> type[BaseHTTPRequ
             if parts == ["api", "doctor"]:
                 self._json(HTTPStatus.OK, control.doctor())
                 return
+            if parts == ["api", "diagnostics", "export"]:
+                self._json_download("forgeos-diagnostics.json", control.diagnostic_bundle())
+                return
             if parts == ["api", "operations"]:
                 self._json(HTTPStatus.OK, control.operations_status())
                 return
@@ -172,6 +177,16 @@ def _handler_type(control: ForgeControlService, token: str) -> type[BaseHTTPRequ
                 return
             if len(parts) == 4 and parts[:2] == ["api", "tasks"] and parts[3] == "report":
                 self._json(HTTPStatus.OK, control.task_report(parts[2]))
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "tasks"]
+                and parts[3:] == ["report", "export"]
+            ):
+                self._json_download(
+                    f"{parts[2]}-task-report.json",
+                    control.task_report(parts[2]),
+                )
                 return
             if parts == ["api", "audit"]:
                 query = parse_qs(urlsplit(self.path).query)
@@ -278,10 +293,28 @@ def _handler_type(control: ForgeControlService, token: str) -> type[BaseHTTPRequ
             body = json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
             self._content(status, "application/json; charset=utf-8", body)
 
+        def _json_download(self, filename: str, value: dict[str, Any]) -> None:
+            body = (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+                "utf-8"
+            )
+            self._content(
+                HTTPStatus.OK,
+                "application/json; charset=utf-8",
+                body,
+                extra_headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
         def _error(self, status: HTTPStatus, code: str, message: str) -> None:
             self._json(status, {"error": {"code": code, "message": message[:2_000]}})
 
-        def _content(self, status: HTTPStatus, content_type: str, body: bytes) -> None:
+        def _content(
+            self,
+            status: HTTPStatus,
+            content_type: str,
+            body: bytes,
+            *,
+            extra_headers: Mapping[str, str] | None = None,
+        ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -294,6 +327,8 @@ def _handler_type(control: ForgeControlService, token: str) -> type[BaseHTTPRequ
                 "default-src 'self'; script-src 'self'; style-src 'self'; "
                 "connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
             )
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
 

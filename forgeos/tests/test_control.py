@@ -103,10 +103,11 @@ class ControlledBlockingGateway(FakeGateway):
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
         developer_instructions: str | None = None,
+        allow_missing_rollout_replacement: bool = False,
         on_progress: Any = None,
         on_started: Any = None,
     ) -> CodexTurnResult:
-        del thread_id, output_schema
+        del thread_id, output_schema, allow_missing_rollout_replacement
         assert "ForgeOS runtime evidence follows" in "\n".join(prompt.texts())
         assert developer_instructions is None
         on_started(CodexTurnControl(thread_id=self.control.thread_id, handle=self.control))
@@ -341,5 +342,196 @@ def test_control_reports_uninitialized_workspace_and_validates_input(tmp_path: P
         assert control.status() == {"initialized": False, "workspace": str(tmp_path.resolve())}
         with pytest.raises(ValueError, match="validation_checks"):
             control.initialize({"name": "Invalid", "validation_checks": "pytest"})
+    finally:
+        control.close()
+
+
+def test_control_diagnostics_are_bounded_and_exclude_runtime_credentials(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    control = ForgeControlService(
+        tmp_path,
+        gateway_factory=lambda: gateway,
+        clock=lambda: NOW,
+    )
+    try:
+        control.initialize(
+            {
+                "name": "Diagnostics",
+                "validation_checks": [
+                    {
+                        "name": "remote-check",
+                        "argv": [sys.executable, "-c", "pass", "Authorization: sentinel-secret"],
+                    }
+                ],
+            }
+        )
+        for index in range(21):
+
+            def sensitive_operation(job_id: str, sequence: int = index) -> dict[str, Any]:
+                control.jobs.update_progress(
+                    job_id,
+                    {"model_content": f"sentinel-progress-{sequence}"},
+                )
+                return {"model_content": f"sentinel-result-{sequence}"}
+
+            job = control.jobs.submit("diagnostic-test", f"TASK-{index:02d}", sensitive_operation)
+            control.jobs.wait(job.id)
+        actual = control.diagnostic_bundle()
+    finally:
+        control.close()
+
+    assert actual["schema_version"] == 1
+    assert actual["generated_at"] == NOW
+    assert actual["status"]["project"]["name"] == "Diagnostics"
+    assert actual["doctor"]["workspace"] == str(tmp_path.resolve())
+    assert len(actual["recent_jobs"]) == 20
+    assert all(
+        set(job)
+        == {
+            "id",
+            "kind",
+            "task_id",
+            "state",
+            "created_at",
+            "started_at",
+            "completed_at",
+        }
+        for job in actual["recent_jobs"]
+    )
+    assert actual["status"]["validation_checks"] == [
+        {
+            "name": "remote-check",
+            "level": "L2_UNIT",
+            "timeout_seconds": 60,
+            "required": True,
+        }
+    ]
+    assert "sentinel-secret" not in str(actual)
+    assert "sentinel-progress" not in str(actual)
+    assert "sentinel-result" not in str(actual)
+    assert "argv" not in str(actual)
+
+
+def test_task_detail_orders_chronological_evidence(tmp_path: Path) -> None:
+    control = initialized_control(tmp_path, FakeGateway())
+    try:
+        task = create_task(control)
+        control.forge.store.write_record(
+            f"executions/{task['id']}/z-older.json",
+            {"turn_id": "turn-older", "started_at": 10, "final_response": "older"},
+        )
+        control.forge.store.write_record(
+            f"executions/{task['id']}/a-newer.json",
+            {"turn_id": "turn-newer", "started_at": 20, "final_response": "newer"},
+        )
+        control.forge.store.write_record(
+            f"executions/{task['id']}/m-newest-without-start.json",
+            {
+                "turn_id": "turn-newest",
+                "started_at": None,
+                "completed_at": 30,
+                "final_response": "newest without start",
+            },
+        )
+        control.forge.store.write_record(
+            "validation/results/z-older.json",
+            {
+                "task_id": task["id"],
+                "report_id": "validation-older",
+                "started_at": "2026-08-24T00:00:01Z",
+                "passed": True,
+            },
+        )
+        control.forge.store.write_record(
+            "validation/results/a-newer.json",
+            {
+                "task_id": task["id"],
+                "report_id": "validation-newer",
+                "started_at": "2026-08-24T00:00:02Z",
+                "passed": True,
+            },
+        )
+        regression_record = {
+            "schema_version": 1,
+            "task_id": task["id"],
+            "baseline_report_id": "validation-baseline",
+            "current_report_id": "validation-current",
+            "passed": True,
+            "checks": [],
+        }
+        control.forge.store.write_record(
+            "validation/regression/z-older.json",
+            {
+                **regression_record,
+                "report_id": "regression-older",
+                "completed_at": "2026-08-24T00:00:01Z",
+            },
+        )
+        control.forge.store.write_record(
+            "validation/regression/a-newer.json",
+            {
+                **regression_record,
+                "report_id": "regression-newer",
+                "completed_at": "2026-08-24T00:00:02Z",
+            },
+        )
+        task_report = {
+            "schema_version": 1,
+            "task_id": task["id"],
+            "objective": "ordered report",
+            "status": "DONE",
+            "changed_files": [],
+            "commands": [],
+            "build_result": [],
+            "test_result": [],
+            "regression_result": {},
+            "review": {},
+            "acceptance": {},
+            "repair_attempts": 0,
+            "risks": [],
+            "technical_debt": [],
+            "final_diff": {},
+            "start_commit": None,
+            "end_commit": None,
+            "validation_report_id": "validation-current",
+            "regression_report_id": "regression-newer",
+        }
+        control.forge.store.write_record(
+            f"reports/{task['id']}/z-older.json",
+            {
+                **task_report,
+                "report_id": "task-report-older",
+                "generated_at": "2026-08-24T00:00:01Z",
+            },
+        )
+        control.forge.store.write_record(
+            f"reports/{task['id']}/a-newer.json",
+            {
+                **task_report,
+                "report_id": "task-report-newer",
+                "generated_at": "2026-08-24T00:00:02Z",
+            },
+        )
+
+        detail = control.task_detail(task["id"])
+
+        assert [item["final_response"] for item in detail["executions"]] == [
+            "older",
+            "newer",
+            "newest without start",
+        ]
+        assert [item["report_id"] for item in detail["validations"]] == [
+            "validation-older",
+            "validation-newer",
+        ]
+        assert [item["report_id"] for item in detail["regressions"]] == [
+            "regression-older",
+            "regression-newer",
+        ]
+        assert [item["report_id"] for item in detail["reports"]] == [
+            "task-report-older",
+            "task-report-newer",
+        ]
+        assert control.task_report(task["id"])["report_id"] == "task-report-newer"
     finally:
         control.close()

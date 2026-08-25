@@ -157,6 +157,16 @@ class ControlledFakeClient(FakeClient):
         return thread
 
 
+class FailingResumeClient(ControlledFakeClient):
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    def thread_resume(self, thread_id: str, **kwargs: Any) -> ControlledFakeThread:
+        self.resumed.append((thread_id, kwargs))
+        raise RuntimeError(self.message)
+
+
 def settings(tmp_path: Path) -> CodexSdkSettings:
     return CodexSdkSettings(workspace=tmp_path)
 
@@ -263,6 +273,56 @@ def test_controlled_resume_injects_fresh_context_in_turn_not_thread_options(
 
     assert client.resumed == [("thread-existing", {"cwd": str(tmp_path.resolve())})]
     assert client.threads[0].runs == [("Fresh bounded runtime context", {})]
+
+
+def test_missing_rollout_starts_replacement_thread_with_fresh_context(tmp_path: Path) -> None:
+    client = FailingResumeClient(
+        "JSON-RPC error -32600: no rollout found for thread id thread-missing"
+    )
+    gateway = CodexSdkGateway(settings(tmp_path), client_factory=lambda _settings: client)
+    controls: list[Any] = []
+
+    result = gateway.run_turn_controlled(
+        "Recover safely",
+        thread_id="thread-missing",
+        developer_instructions="Bounded replacement context",
+        allow_missing_rollout_replacement=True,
+        on_started=controls.append,
+    )
+
+    assert result.thread_id == "thread-controlled"
+    assert controls[0].replaced_thread_id == "thread-missing"
+    assert client.resumed == [("thread-missing", {"cwd": str(tmp_path.resolve())})]
+    assert client.started == [
+        {
+            "cwd": str(tmp_path.resolve()),
+            "developer_instructions": "Bounded replacement context",
+            "ephemeral": False,
+        }
+    ]
+    assert client.threads[0].runs == [("Recover safely", {})]
+
+
+def test_missing_rollout_replacement_is_denied_by_default(tmp_path: Path) -> None:
+    client = FailingResumeClient(
+        "JSON-RPC error -32600: no rollout found for thread id thread-missing"
+    )
+    gateway = CodexSdkGateway(settings(tmp_path), client_factory=lambda _settings: client)
+
+    with pytest.raises(RuntimeError, match="no rollout found"):
+        gateway.run_turn_controlled("Continue", thread_id="thread-missing")
+
+    assert client.started == []
+
+
+def test_resume_error_other_than_missing_rollout_is_not_masked(tmp_path: Path) -> None:
+    client = FailingResumeClient("JSON-RPC error -32600: invalid resume request")
+    gateway = CodexSdkGateway(settings(tmp_path), client_factory=lambda _settings: client)
+
+    with pytest.raises(RuntimeError, match="invalid resume request"):
+        gateway.run_turn_controlled("Continue", thread_id="thread-existing")
+
+    assert client.started == []
 
 
 def test_sdk_boundary_bounds_direct_model_input(tmp_path: Path) -> None:

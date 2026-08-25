@@ -35,6 +35,21 @@
           </label>
           <button class="primary" type="submit">初始化 ForgeOS</button>
         </form>
+        <div id="bootstrap-readiness" class="readiness-list"></div>
+      </section>
+
+      <section id="pilot-panel" class="panel pilot-panel hidden">
+        <div>
+          <p class="eyebrow">V1.1 OPERATOR READINESS</p>
+          <div class="pilot-heading"><h2 id="readiness-title">检查运行环境</h2><span id="readiness-badge" class="readiness-badge">CHECKING</span></div>
+          <p id="pilot-next" class="pilot-next">正在确定下一步操作。</p>
+          <div id="readiness-list" class="readiness-list"></div>
+        </div>
+        <div class="pilot-actions">
+          <button id="pilot-new-task" class="primary">创建任务</button>
+          <button id="diagnostics-download" class="secondary">下载诊断</button>
+          <button id="readiness-refresh" class="secondary">重新检查</button>
+        </div>
       </section>
 
       <section id="workspace-panel" class="workspace-grid hidden">
@@ -163,6 +178,7 @@
 
   <div id="toast" class="toast hidden"></div>
   <script src="/assets/operator.js"></script>
+  <script src="/assets/pilot.js"></script>
   <script src="/assets/app.js"></script>
 </body>
 </html>

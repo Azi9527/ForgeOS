@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -136,11 +136,33 @@ class ForgeControlService:
         events = [
             event.to_dict() for event in self.forge.audit.read_all() if event.task_id == task_id
         ]
-        executions = self.forge.store.list_records(f"executions/{task_id}")
+        executions = sorted(
+            self.forge.store.list_records(f"executions/{task_id}"),
+            key=lambda record: (
+                record["started_at"]
+                if isinstance(record.get("started_at"), int)
+                else record["completed_at"]
+                if isinstance(record.get("completed_at"), int)
+                else -1,
+                str(record.get("turn_id", "")),
+            ),
+        )
         attempts = [attempt.to_dict() for attempt in self.attempts.list_for_task(task_id)]
-        git_snapshots = self.forge.store.list_records(f"evidence/git/{task_id}")
-        contexts = self.forge.store.list_records(f"context/packages/{task_id}")
-        memory_selections = self.forge.store.list_records(f"memory/selections/{task_id}")
+        git_snapshots = _chronological_records(
+            self.forge.store.list_records(f"evidence/git/{task_id}"),
+            timestamp_field="captured_at",
+            identifier_field="snapshot_id",
+        )
+        contexts = _chronological_records(
+            self.forge.store.list_records(f"context/packages/{task_id}"),
+            timestamp_field="created_at",
+            identifier_field="package_id",
+        )
+        memory_selections = _chronological_records(
+            self.forge.store.list_records(f"memory/selections/{task_id}"),
+            timestamp_field="created_at",
+            identifier_field="selection_id",
+        )
         memories = [
             item.to_dict()
             for item in self.memory.list()
@@ -152,22 +174,53 @@ class ForgeControlService:
                 if isinstance(selection, dict)
             )
         ]
-        policy_evaluations = list(self.policy.evaluations(task_id))
-        validations = tuple(
-            report
-            for report in self.forge.store.list_records("validation/results")
-            if report.get("task_id") == task_id
+        policy_evaluations = _chronological_records(
+            self.policy.evaluations(task_id),
+            timestamp_field="evaluated_at",
+            identifier_field="id",
+        )
+        validations = _chronological_records(
+            (
+                report
+                for report in self.forge.store.list_records("validation/results")
+                if report.get("task_id") == task_id
+            ),
+            timestamp_field="started_at",
+            identifier_field="report_id",
         )
         baseline = ValidationReportRepository(self.forge.store).baseline(task_id)
-        regressions = [
-            report.to_dict()
-            for report in RegressionService(self.forge.store, clock=self.clock).for_task(task_id)
-        ]
-        reports = [
-            report.to_dict()
-            for report in TaskReportService(self.forge.store, clock=self.clock).for_task(task_id)
-        ]
+        regressions = _chronological_records(
+            (
+                report.to_dict()
+                for report in RegressionService(self.forge.store, clock=self.clock).for_task(
+                    task_id
+                )
+            ),
+            timestamp_field="completed_at",
+            identifier_field="report_id",
+        )
+        reports = _chronological_records(
+            (
+                report.to_dict()
+                for report in TaskReportService(self.forge.store, clock=self.clock).for_task(
+                    task_id
+                )
+            ),
+            timestamp_field="generated_at",
+            identifier_field="report_id",
+        )
         jobs = [job.to_dict() for job in self.jobs.list() if job.task_id == task_id]
+        operational_evidence = self._require_operations().task_evidence(task_id)
+        operational_evidence["budgets"] = _chronological_records(
+            operational_evidence["budgets"],
+            timestamp_field="evaluated_at",
+            identifier_field="id",
+        )
+        operational_evidence["recovery_runs"] = _chronological_records(
+            operational_evidence["recovery_runs"],
+            timestamp_field="recovered_at",
+            identifier_field="id",
+        )
         return {
             "task": task.to_dict(),
             "audit": events,
@@ -183,7 +236,7 @@ class ForgeControlService:
             "regressions": regressions,
             "reports": reports,
             "jobs": jobs,
-            **self._require_operations().task_evidence(task_id),
+            **operational_evidence,
         }
 
     def audit_events(
@@ -292,13 +345,58 @@ class ForgeControlService:
         return self._require_operations().recover()
 
     def task_report(self, task_id: str) -> dict[str, Any]:
+        task = self.forge.task(task_id)
         reports = TaskReportService(self.forge.store, clock=self.clock).for_task(task_id)
         if not reports:
             raise ForgeNotFoundError(f"task has no Forge Task Report: {task_id}")
-        return reports[-1].to_dict()
+        if task.task_report_id is not None:
+            linked = next(
+                (report for report in reports if report.report_id == task.task_report_id),
+                None,
+            )
+            if linked is None:
+                raise ForgeNotFoundError(
+                    f"task report is missing for {task_id}: {task.task_report_id}"
+                )
+            return linked.to_dict()
+        return max(reports, key=lambda report: (report.generated_at, report.report_id)).to_dict()
 
     def doctor(self) -> dict[str, Any]:
         return ForgeDoctor(self.forge.store.project_root).run().to_dict()
+
+    def diagnostic_bundle(self) -> dict[str, Any]:
+        """Return bounded operator diagnostics without credentials or model content."""
+
+        status = self.status()
+        if status["initialized"]:
+            config = self.forge.config()
+            status["validation_checks"] = [
+                {
+                    "name": check.name,
+                    "level": check.level.value,
+                    "timeout_seconds": check.timeout_seconds,
+                    "required": check.required,
+                }
+                for check in config.validation_checks
+            ]
+        return {
+            "schema_version": 1,
+            "generated_at": self.clock(),
+            "status": status,
+            "doctor": self.doctor(),
+            "recent_jobs": [
+                {
+                    "id": job.id,
+                    "kind": job.kind,
+                    "task_id": job.task_id,
+                    "state": job.state.value,
+                    "created_at": job.created_at,
+                    "started_at": job.started_at,
+                    "completed_at": job.completed_at,
+                }
+                for job in self.jobs.list()[:20]
+            ],
+        }
 
     def submit_run(self, task_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         self.forge.task(task_id)
@@ -487,3 +585,18 @@ class ForgeControlService:
 class _UnavailableGateway:
     def run_turn(self, *_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("Codex gateway is unavailable for this control operation")
+
+
+def _chronological_records(
+    records: Iterable[dict[str, Any]],
+    *,
+    timestamp_field: str,
+    identifier_field: str,
+) -> list[dict[str, Any]]:
+    return sorted(
+        records,
+        key=lambda record: (
+            str(record.get(timestamp_field, "")),
+            str(record.get(identifier_field, "")),
+        ),
+    )

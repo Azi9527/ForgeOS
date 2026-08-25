@@ -261,6 +261,10 @@ class ForgeExecutionService:
         *,
         developer_instructions: str | None,
     ) -> tuple[CodexTurnResult, ExecutionAttempt, ForgeTask]:
+        replacement_allowed = task.codex_thread_id is not None and not any(
+            record.get("thread_id") == task.codex_thread_id
+            for record in self.forge.store.list_records(f"executions/{task.id}")
+        )
         controlled = getattr(self.codex, "run_turn_controlled", None)
         if not callable(controlled):
             result = self.codex.run_turn(actual_prompt, thread_id=task.codex_thread_id)
@@ -269,6 +273,18 @@ class ForgeExecutionService:
                 thread_id=result.thread_id,
                 turn_id=result.turn_id,
             )
+            if result.replaced_thread_id is not None:
+                if not replacement_allowed:
+                    raise ForgeConflictError(
+                        f"task {task.id} cannot replace a Codex thread with persisted history"
+                    )
+                task = self.forge.replace_missing_codex_thread(
+                    task.id,
+                    expected_revision=task.revision,
+                    previous_thread_id=result.replaced_thread_id,
+                    thread_id=result.thread_id,
+                    turn_id=result.turn_id,
+                )
             return result, attempt, task
 
         active_attempt = attempt
@@ -281,13 +297,22 @@ class ForgeExecutionService:
                 thread_id=control.thread_id,
                 turn_id=control.turn_id,
             )
-            active_task = self.forge.record_codex_turn(
-                active_task.id,
-                expected_revision=active_task.revision,
-                thread_id=control.thread_id,
-                turn_id=control.turn_id,
-                runtime_status="inProgress",
-            )
+            if control.replaced_thread_id is None:
+                active_task = self.forge.record_codex_turn(
+                    active_task.id,
+                    expected_revision=active_task.revision,
+                    thread_id=control.thread_id,
+                    turn_id=control.turn_id,
+                    runtime_status="inProgress",
+                )
+            else:
+                active_task = self.forge.replace_missing_codex_thread(
+                    active_task.id,
+                    expected_revision=active_task.revision,
+                    previous_thread_id=control.replaced_thread_id,
+                    thread_id=control.thread_id,
+                    turn_id=control.turn_id,
+                )
             if self.on_started is not None:
                 self.on_started(active_attempt, control)
 
@@ -299,6 +324,7 @@ class ForgeExecutionService:
             actual_prompt,
             thread_id=task.codex_thread_id,
             developer_instructions=developer_instructions,
+            allow_missing_rollout_replacement=replacement_allowed,
             on_progress=progress,
             on_started=started,
         )

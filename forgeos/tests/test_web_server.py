@@ -96,6 +96,7 @@ def test_web_ui_requires_token_and_serves_security_headers(tmp_path: Path) -> No
         operator_status, operator_script, _operator_headers = request(
             server, "/assets/operator.js", token=None
         )
+        pilot_status, pilot_script, _pilot_headers = request(server, "/assets/pilot.js", token=None)
 
     assert forbidden == 403
     assert body["error"]["code"] == "forbidden"
@@ -105,6 +106,7 @@ def test_web_ui_requires_token_and_serves_security_headers(tmp_path: Path) -> No
     assert headers["X-Frame-Options"] == "DENY"
     assert asset_status == 200
     assert operator_status == 200
+    assert pilot_status == 200
     assert "async function refresh()" in script
     assert 'activeJob.kind === "run" ? "Codex 运行中…"' in script
     assert 'button.textContent = "正在提交…"' in script
@@ -124,6 +126,11 @@ def test_web_ui_requires_token_and_serves_security_headers(tmp_path: Path) -> No
     assert "decideMemoryFromOperator" in operator_script
     assert "retirePolicyFromOperator" in operator_script
     assert "window.prompt" not in operator_script
+    assert "taskGuidance" in pilot_script
+    assert "补全历史任务报告" in pilot_script
+    assert "diagnostics-download" in html
+    assert "forgeos-diagnostics.json" in script
+    assert "V1.1 OPERATOR READINESS" in html
 
 
 def test_web_api_full_project_task_flow(tmp_path: Path) -> None:
@@ -210,6 +217,14 @@ def test_web_api_full_project_task_flow(tmp_path: Path) -> None:
             server,
             f"/api/tasks/{task['id']}/report",
         )
+        export_status, exported, export_headers = request(
+            server,
+            f"/api/tasks/{task['id']}/report/export",
+        )
+        diagnostic_status, diagnostic, diagnostic_headers = request(
+            server,
+            "/api/diagnostics/export",
+        )
 
     assert unauthorized == 403
     assert error["error"]["code"] == "forbidden"
@@ -229,6 +244,19 @@ def test_web_api_full_project_task_flow(tmp_path: Path) -> None:
     assert report_status == 200
     assert report["report_id"] == accepted["task_report_id"]
     assert report["regression_result"]["passed"] is True
+    assert export_status == 200
+    assert exported == report
+    assert export_headers["Content-Disposition"] == (
+        f'attachment; filename="{task["id"]}-task-report.json"'
+    )
+    assert diagnostic_status == 200
+    assert diagnostic["schema_version"] == 1
+    assert diagnostic["status"]["project"]["name"] == "Web Project"
+    assert diagnostic["doctor"]["passed"] is True
+    assert "test-token" not in json.dumps(diagnostic)
+    assert diagnostic_headers["Content-Disposition"] == (
+        'attachment; filename="forgeos-diagnostics.json"'
+    )
 
 
 def test_web_api_memory_lifecycle_and_policy_evidence(tmp_path: Path) -> None:
@@ -392,7 +420,7 @@ def test_web_api_n5_release_audit_memory_and_policy_operator(tmp_path: Path) -> 
     assert retired_status == 200
     assert retired["active"] is False
     assert operator_status == 200
-    assert operator["package_version"] == "0.2.0"
+    assert operator["package_version"] == "0.2.1"
     assert operator["fixtures"]["passed"] is True
 
 

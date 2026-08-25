@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import webbrowser
 from pathlib import Path
 from typing import Sequence
 
@@ -82,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--port", type=int, default=8765)
     ui.add_argument("--codex-bin", type=Path)
     ui.add_argument("--read-only", action="store_true")
+    ui.add_argument("--open-browser", action="store_true")
 
     task = commands.add_parser("task", help="manage ForgeTask records")
     task_commands = task.add_subparsers(dest="task_command", required=True)
@@ -431,6 +433,8 @@ def _serve_ui(args: argparse.Namespace) -> int:
     control = ForgeControlService(args.workspace, codex_settings=settings)
     server = ForgeWebServer(control, port=args.port)
     print(f"ForgeOS UI: {server.url}", flush=True)
+    if args.open_browser and not webbrowser.open(server.url):
+        print("ForgeOS could not open a browser; use the URL above.", file=sys.stderr, flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

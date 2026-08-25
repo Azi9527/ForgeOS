@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from forgeos.codex_sdk import CodexTurnResult
+from forgeos.errors import ForgeConflictError
 from forgeos.execution import ForgeExecutionService
+from forgeos.execution_events import CodexTurnControl
 from forgeos.execution_records import AttemptState, ExecutionAttemptRepository
 from forgeos.model_input import ModelInput
 from forgeos.models import TaskStatus, TaskType, ValidationEvidence
@@ -35,8 +38,63 @@ class FakeGateway:
         return self.results.pop(0)
 
 
+@dataclass
+class FakeTurnHandle:
+    id: str
+
+
+@dataclass
+class MissingRolloutControlledGateway:
+    calls: int = 0
+
+    def __post_init__(self) -> None:
+        self.replacement_permissions: list[bool] = []
+
+    def run_turn_controlled(
+        self,
+        prompt: ModelInput,
+        *,
+        thread_id: str | None = None,
+        output_schema: dict[str, Any] | None = None,
+        developer_instructions: str | None = None,
+        allow_missing_rollout_replacement: bool = False,
+        on_progress: Any = None,
+        on_started: Any = None,
+    ) -> CodexTurnResult:
+        del prompt, output_schema, developer_instructions, on_progress
+        self.calls += 1
+        self.replacement_permissions.append(allow_missing_rollout_replacement)
+        if self.calls == 1:
+            assert thread_id is None
+            on_started(
+                CodexTurnControl(
+                    thread_id="thread-missing",
+                    handle=FakeTurnHandle("turn-missing"),
+                )
+            )
+            raise RuntimeError("stream disconnected before rollout persistence")
+        assert thread_id == "thread-missing"
+        assert allow_missing_rollout_replacement is True
+        on_started(
+            CodexTurnControl(
+                thread_id="thread-replacement",
+                handle=FakeTurnHandle("turn-replacement"),
+                replaced_thread_id="thread-missing",
+            )
+        )
+        return result(
+            thread_id="thread-replacement",
+            turn_id="turn-replacement",
+            replaced_thread_id="thread-missing",
+        )
+
+
 def result(
-    *, thread_id: str = "thread-1", turn_id: str = "turn-1", status: str = "completed"
+    *,
+    thread_id: str = "thread-1",
+    turn_id: str = "turn-1",
+    status: str = "completed",
+    replaced_thread_id: str | None = None,
 ) -> CodexTurnResult:
     return CodexTurnResult(
         thread_id=thread_id,
@@ -49,6 +107,7 @@ def result(
         duration_ms=1_000,
         items=(),
         usage={"totalTokens": 10},
+        replaced_thread_id=replaced_thread_id,
     )
 
 
@@ -98,6 +157,57 @@ def test_repair_resumes_same_codex_thread(tmp_path: Path) -> None:
     assert gateway.calls[0][1] is None
     assert gateway.calls[1][1] == "thread-1"
     assert second.last_turn_id == "turn-2"
+
+
+def test_missing_rollout_rejects_replacement_when_thread_has_history(tmp_path: Path) -> None:
+    forge, task_id = task_service(tmp_path)
+    gateway = FakeGateway(
+        [
+            result(status="failed"),
+            result(
+                thread_id="thread-2",
+                turn_id="turn-2",
+                replaced_thread_id="thread-1",
+            ),
+        ]
+    )
+    execution = ForgeExecutionService(forge, gateway)
+
+    blocked = execution.run_task(task_id)
+    with pytest.raises(ForgeConflictError, match="persisted history"):
+        execution.run_task(blocked.id)
+
+    assert blocked.status is TaskStatus.blocked
+    recovered = forge.task(blocked.id)
+    assert recovered.status is TaskStatus.blocked
+    assert recovered.codex_thread_id == "thread-1"
+    assert recovered.last_turn_id == "turn-1"
+    replacement = [
+        event for event in forge.audit.read_all() if event.event_type == "codex.thread.replaced"
+    ]
+    assert replacement == []
+
+
+def test_missing_rollout_rebinds_thread_without_persisted_history(tmp_path: Path) -> None:
+    forge, task_id = task_service(tmp_path)
+    gateway = MissingRolloutControlledGateway()
+    execution = ForgeExecutionService(forge, gateway)
+
+    with pytest.raises(RuntimeError, match="stream disconnected"):
+        execution.run_task(task_id)
+    blocked = forge.task(task_id)
+    recovered = execution.run_task(blocked.id)
+
+    assert blocked.status is TaskStatus.blocked
+    assert recovered.status is TaskStatus.validating
+    assert recovered.codex_thread_id == "thread-replacement"
+    assert gateway.replacement_permissions == [False, True]
+    records = forge.store.list_records(f"executions/{task_id}")
+    assert [record["thread_id"] for record in records] == ["thread-replacement"]
+    replacement = [
+        event for event in forge.audit.read_all() if event.event_type == "codex.thread.replaced"
+    ]
+    assert replacement[0].payload["previous_thread_id"] == "thread-missing"
 
 
 def test_repair_resume_rebuilds_runtime_context(tmp_path: Path) -> None:

@@ -59,6 +59,8 @@ Every `/api/*` request requires `X-ForgeOS-Token`.
 | --- | --- | --- |
 | GET | `/api/status` | Project/runtime status |
 | GET | `/api/doctor` | Read-only environment and recovery diagnostics |
+| GET | `/api/diagnostics/export` | Bounded status, readiness and recent-job metadata download |
+| GET | `/api/tasks/{task_id}/report/export` | Final Forge Task Report JSON download |
 | POST | `/api/project/init` | Initialize ForgeProject and validation checks |
 | GET/POST | `/api/tasks` | List/create tasks |
 | GET | `/api/tasks/{id}` | Task plus Audit/Execution/Validation/Job evidence |
