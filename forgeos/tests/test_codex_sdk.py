@@ -285,6 +285,7 @@ def test_missing_rollout_starts_replacement_thread_with_fresh_context(tmp_path: 
         "Recover safely",
         thread_id="thread-missing",
         developer_instructions="Bounded replacement context",
+        allow_missing_rollout_replacement=True,
     )
 
     assert result.thread_id == "thread-controlled"
@@ -297,6 +298,18 @@ def test_missing_rollout_starts_replacement_thread_with_fresh_context(tmp_path: 
         }
     ]
     assert client.threads[0].runs == [("Recover safely", {})]
+
+
+def test_missing_rollout_replacement_is_denied_by_default(tmp_path: Path) -> None:
+    client = FailingResumeClient(
+        "JSON-RPC error -32600: no rollout found for thread id thread-missing"
+    )
+    gateway = CodexSdkGateway(settings(tmp_path), client_factory=lambda _settings: client)
+
+    with pytest.raises(RuntimeError, match="no rollout found"):
+        gateway.run_turn_controlled("Continue", thread_id="thread-missing")
+
+    assert client.started == []
 
 
 def test_resume_error_other_than_missing_rollout_is_not_masked(tmp_path: Path) -> None:

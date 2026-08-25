@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from forgeos.codex_sdk import CodexTurnResult
+from forgeos.errors import ForgeConflictError
 from forgeos.execution import ForgeExecutionService
 from forgeos.execution_records import AttemptState, ExecutionAttemptRepository
 from forgeos.model_input import ModelInput
@@ -105,7 +106,7 @@ def test_repair_resumes_same_codex_thread(tmp_path: Path) -> None:
     assert second.last_turn_id == "turn-2"
 
 
-def test_missing_rollout_rebinds_blocked_task_to_replacement_thread(tmp_path: Path) -> None:
+def test_missing_rollout_rejects_replacement_when_thread_has_history(tmp_path: Path) -> None:
     forge, task_id = task_service(tmp_path)
     gateway = FakeGateway(
         [
@@ -120,22 +121,18 @@ def test_missing_rollout_rebinds_blocked_task_to_replacement_thread(tmp_path: Pa
     execution = ForgeExecutionService(forge, gateway)
 
     blocked = execution.run_task(task_id)
-    recovered = execution.run_task(blocked.id)
+    with pytest.raises(ForgeConflictError, match="persisted history"):
+        execution.run_task(blocked.id)
 
     assert blocked.status is TaskStatus.blocked
-    assert recovered.status is TaskStatus.validating
-    assert recovered.codex_thread_id == "thread-2"
-    assert recovered.last_turn_id == "turn-2"
+    recovered = forge.task(blocked.id)
+    assert recovered.status is TaskStatus.blocked
+    assert recovered.codex_thread_id == "thread-1"
+    assert recovered.last_turn_id == "turn-1"
     replacement = [
         event for event in forge.audit.read_all() if event.event_type == "codex.thread.replaced"
     ]
-    assert replacement[0].payload == {
-        "previous_thread_id": "thread-1",
-        "thread_id": "thread-2",
-        "turn_id": "turn-2",
-        "reason": "rollout_missing",
-        "revision": recovered.revision - 1,
-    }
+    assert replacement == []
 
 
 def test_repair_resume_rebuilds_runtime_context(tmp_path: Path) -> None:

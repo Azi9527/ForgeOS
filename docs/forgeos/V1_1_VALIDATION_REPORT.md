@@ -36,7 +36,7 @@ launch → readiness → create/select Task → recommended next action
 
 | Gate | Result |
 | --- | --- |
-| Python suite | PASS — 123 tests after recovery and response-ordering coverage |
+| Python suite | PASS — 124 tests after recovery, history guard and evidence-ordering coverage |
 | Ruff | PASS |
 | Ruff format check | PASS — 64 files formatted |
 | JavaScript syntax | PASS — `operator.js`, `pilot.js`, `app.js` |
@@ -67,8 +67,9 @@ loopback server.
 
 The second pilot created real task `FORGE-0003`. A network interruption left a persisted Thread ID
 before Codex had created a rollout. The task correctly blocked. V1.1 now starts a replacement only
-for the exact `no rollout found for thread id` error and persists a `codex.thread.replaced` event
-before continuing. Other resume errors remain failures.
+for the exact `no rollout found for thread id` error and only when that Thread has no persisted
+Execution Record. It persists a `codex.thread.replaced` event before continuing. Other resume
+errors and Threads with prior history remain failures.
 
 The replacement Thread completed a real Codex turn under `read_only` workspace access and
 `deny_all` approval policy. ForgeOS then produced final Validation (123 tests), passing L4

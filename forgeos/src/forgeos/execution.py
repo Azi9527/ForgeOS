@@ -261,6 +261,10 @@ class ForgeExecutionService:
         *,
         developer_instructions: str | None,
     ) -> tuple[CodexTurnResult, ExecutionAttempt, ForgeTask]:
+        replacement_allowed = task.codex_thread_id is not None and not any(
+            record.get("thread_id") == task.codex_thread_id
+            for record in self.forge.store.list_records(f"executions/{task.id}")
+        )
         controlled = getattr(self.codex, "run_turn_controlled", None)
         if not callable(controlled):
             result = self.codex.run_turn(actual_prompt, thread_id=task.codex_thread_id)
@@ -270,6 +274,10 @@ class ForgeExecutionService:
                 turn_id=result.turn_id,
             )
             if result.replaced_thread_id is not None:
+                if not replacement_allowed:
+                    raise ForgeConflictError(
+                        f"task {task.id} cannot replace a Codex thread with persisted history"
+                    )
                 task = self.forge.replace_missing_codex_thread(
                     task.id,
                     expected_revision=task.revision,
@@ -316,6 +324,7 @@ class ForgeExecutionService:
             actual_prompt,
             thread_id=task.codex_thread_id,
             developer_instructions=developer_instructions,
+            allow_missing_rollout_replacement=replacement_allowed,
             on_progress=progress,
             on_started=started,
         )

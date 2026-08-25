@@ -9,8 +9,9 @@ version in `pyproject.toml` and release tags use `forgeos-v<version>`.
   Forge Task Report download, and optional exact-URL browser launch.
 - Added a real read-only ForgeTask pilot covering Codex, Validation, Review, Acceptance, and final
   report evidence.
-- Recover a persisted Thread ID only when Codex explicitly reports that its rollout never existed;
-  the replacement Thread is narrowly authorized and recorded in Audit.
+- Recover a persisted Thread ID only when Codex explicitly reports that its rollout never existed
+  and ForgeOS has no persisted execution history for that Thread; the replacement is narrowly
+  authorized and recorded in Audit.
 - Added `pilot.js` to both runtime and distribution release gates. PyPI remains an optional manual
   target and does not block GitHub Releases.
 

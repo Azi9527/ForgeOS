@@ -103,10 +103,11 @@ class ControlledBlockingGateway(FakeGateway):
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
         developer_instructions: str | None = None,
+        allow_missing_rollout_replacement: bool = False,
         on_progress: Any = None,
         on_started: Any = None,
     ) -> CodexTurnResult:
-        del thread_id, output_schema
+        del thread_id, output_schema, allow_missing_rollout_replacement
         assert "ForgeOS runtime evidence follows" in "\n".join(prompt.texts())
         assert developer_instructions is None
         on_started(CodexTurnControl(thread_id=self.control.thread_id, handle=self.control))

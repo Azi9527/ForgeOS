@@ -40,10 +40,12 @@ listeners were closed after each test session.
    `01a03768-8d9d-7f32-a671-607cffa28726`, completed read-only, and produced current Validation
    evidence with 122 passing tests before the final response-ordering regression test was added.
 
-Other resume failures are not masked. Unit and execution integration tests cover both the permitted
-replacement and the fail-closed path. The final suite contains 123 tests, including chronological
-ordering of Execution, Validation, Regression and Task Report evidence so the Operator UI presents
-the latest result.
+Other resume failures are not masked. Replacement is permitted only when the missing Thread has no
+persisted Execution Record; any Thread with history remains fail-closed so ForgeOS cannot silently
+lose prior model context. Unit and execution integration tests cover both paths. The pilot
+Validation contained 123 tests; the reviewed release candidate contains 124 after adding the
+history guard test. It also covers chronological ordering of Execution, Validation, Regression and
+Task Report evidence so the Operator UI presents the latest result.
 
 ## Lifecycle result
 

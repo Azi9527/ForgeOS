@@ -227,6 +227,13 @@ class ForgeService:
             )
         if current.codex_thread_id != previous_thread_id or previous_thread_id == thread_id:
             raise ForgeConflictError(f"task {task_id} Codex thread replacement is inconsistent")
+        if any(
+            record.get("thread_id") == previous_thread_id
+            for record in self.store.list_records(f"executions/{task_id}")
+        ):
+            raise ForgeConflictError(
+                f"task {task_id} cannot replace a Codex thread with persisted history"
+            )
         updated = replace(
             current,
             codex_thread_id=thread_id,

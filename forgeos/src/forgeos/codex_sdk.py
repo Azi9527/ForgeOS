@@ -179,6 +179,7 @@ class CodexSdkGateway:
         *,
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
+        allow_missing_rollout_replacement: bool = False,
     ) -> CodexTurnResult:
         """Run one turn on a new thread or resume a persisted Codex thread."""
 
@@ -202,6 +203,7 @@ class CodexSdkGateway:
                 resume_options=thread_options,
                 start_options=thread_options,
                 ephemeral=self.settings.ephemeral_threads,
+                allow_replacement=allow_missing_rollout_replacement,
             )
 
         run_options: dict[str, Any] = {}
@@ -221,6 +223,7 @@ class CodexSdkGateway:
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
         developer_instructions: str | None = None,
+        allow_missing_rollout_replacement: bool = False,
         on_progress: ProgressCallback | None = None,
         on_started: TurnStartedCallback | None = None,
     ) -> CodexTurnResult:
@@ -249,6 +252,7 @@ class CodexSdkGateway:
                 resume_options={"cwd": str(self.settings.workspace)},
                 start_options=thread_options,
                 ephemeral=self.settings.ephemeral_threads,
+                allow_replacement=allow_missing_rollout_replacement,
             )
 
         run_options: dict[str, Any] = {}
@@ -283,6 +287,7 @@ def _resume_or_restart(
     resume_options: dict[str, Any],
     start_options: dict[str, Any],
     ephemeral: bool,
+    allow_replacement: bool,
 ) -> tuple[_SdkThread, str | None]:
     """Start a replacement only when Codex confirms the rollout never existed."""
 
@@ -290,6 +295,8 @@ def _resume_or_restart(
         return client.thread_resume(thread_id, **resume_options), None
     except Exception as exc:
         if "no rollout found for thread id" not in str(exc).lower():
+            raise
+        if not allow_replacement:
             raise
     return client.thread_start(**start_options, ephemeral=ephemeral), thread_id
 

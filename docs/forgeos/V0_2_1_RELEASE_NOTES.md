@@ -12,8 +12,8 @@ file-backed architecture and makes the engineering path easier to operate:
 - show one recommended action for each ForgeTask state;
 - export bounded diagnostics and final Task Reports;
 - optionally open the exact tokenized loopback URL with `forge ui --open-browser`;
-- safely replace a stale Thread ID only when Codex confirms that no rollout exists, with an
-  explicit `codex.thread.replaced` Audit event.
+- safely replace a stale Thread ID only when Codex confirms that no rollout exists and ForgeOS has
+  no persisted execution history for it, with an explicit `codex.thread.replaced` Audit event.
 - complete the first bounded real-workspace pilot from CREATED through DONE with a generated,
   auditable Task Report.
 
