@@ -30,7 +30,7 @@ attestation, tag push, GitHub Release, TestPyPI upload, or PyPI upload has been 
 | --- | --- | --- |
 | Ruff lint | PASS | `All checks passed!` |
 | Ruff format | PASS | 60 files formatted |
-| Pytest | PASS | 104 tests |
+| Pytest | PASS | 105 tests after the Windows lock-contention regression test |
 | JavaScript syntax | PASS | `app.js` and `operator.js` |
 | YAML parse | PASS | Both ForgeOS workflow files parsed locally |
 | Wheel build | PASS | `forgeos_harness-0.2.0-py3-none-any.whl` |

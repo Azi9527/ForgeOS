@@ -220,10 +220,14 @@ class ForgeStore:
         while descriptor is None:
             try:
                 descriptor = os.open(safe_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
+            except (FileExistsError, PermissionError) as exc:
+                if isinstance(exc, PermissionError) and os.name != "nt":
+                    raise
                 try:
                     lock_age = time.time() - safe_lock.stat().st_mtime
                 except FileNotFoundError:
+                    if isinstance(exc, PermissionError):
+                        raise
                     continue
                 if lock_age > 60:
                     try:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import forgeos.storage as storage_module
 from forgeos.audit import AuditActor
 from forgeos.config import ForgeConfig, ValidationCheckConfig
 from forgeos.errors import ForgeConfigError, ForgeConflictError
@@ -84,6 +85,36 @@ def test_task_id_allocation_is_concurrent_safe(tmp_path: Path) -> None:
 
     assert len(set(identifiers)) == 20
     assert set(identifiers) == {f"FORGE-{index:04d}" for index in range(1, 21)}
+
+
+def test_windows_existing_lock_permission_error_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = initialized_service(tmp_path).store
+    lock_path = store.forge_dir / "tasks" / ".permission.lock"
+    real_open = storage_module.os.open
+    attempts = 0
+
+    def permission_once(path: Path, flags: int) -> int:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            path.write_text("held", encoding="utf-8")
+            raise PermissionError(13, "lock exists", str(path))
+        return real_open(path, flags)
+
+    def release_lock(_seconds: float) -> None:
+        lock_path.unlink(missing_ok=True)
+
+    monkeypatch.setattr(storage_module.os, "name", "nt")
+    monkeypatch.setattr(storage_module.os, "open", permission_once)
+    monkeypatch.setattr(storage_module.time, "sleep", release_lock)
+
+    with store.exclusive_lock(lock_path):
+        assert lock_path.is_file()
+
+    assert attempts == 2
+    assert lock_path.exists() is False
 
 
 def test_transition_rejects_stale_revision(tmp_path: Path) -> None:
