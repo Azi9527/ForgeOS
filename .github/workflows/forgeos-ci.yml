@@ -1,0 +1,90 @@
+name: ForgeOS CI
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/forgeos-*.yml"
+      - "forgeos/**"
+      - "docs/forgeos/**"
+      - ".gitignore"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forgeos-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-matrix:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: forgeos/pyproject.toml
+      - name: Install package and test tools
+        run: python -m pip install --disable-pip-version-check -e "./forgeos[test]" ruff
+      - name: Lint
+        run: python -m ruff check forgeos/src forgeos/tests
+      - name: Format check
+        run: python -m ruff format --check forgeos/src forgeos/tests
+      - name: Test
+        run: python -m pytest forgeos/tests
+
+  static-assets:
+    name: Operator assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check JavaScript syntax
+        run: |
+          node --check forgeos/src/forgeos/web/app.js
+          node --check forgeos/src/forgeos/web/operator.js
+
+  distribution:
+    name: Distribution gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: forgeos/pyproject.toml
+      - name: Install build tools and package
+        run: python -m pip install --disable-pip-version-check build -e "./forgeos[test]"
+      - name: Build wheel and source distribution
+        run: python -m build forgeos --outdir forgeos/dist
+      - name: Inspect distribution and write checksums
+        run: >-
+          python -m forgeos.release_artifacts
+          --project-root forgeos
+          --dist forgeos/dist
+          --write-checksums
+      - name: Upload candidate distributions
+        uses: actions/upload-artifact@v5
+        with:
+          name: forgeos-candidate-distributions
+          path: |
+            forgeos/dist/*.whl
+            forgeos/dist/*.tar.gz
+            forgeos/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
