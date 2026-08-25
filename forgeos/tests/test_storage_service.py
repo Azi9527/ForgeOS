@@ -117,6 +117,41 @@ def test_windows_existing_lock_permission_error_is_retried(
     assert lock_path.exists() is False
 
 
+def test_non_windows_lock_permission_error_is_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = initialized_service(tmp_path).store
+    lock_path = store.forge_dir / "tasks" / ".permission.lock"
+    lock_path.write_text("held", encoding="utf-8")
+    monkeypatch.setattr(storage_module.os, "name", "posix")
+    monkeypatch.setattr(
+        storage_module.os,
+        "open",
+        lambda _path, _flags: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    with pytest.raises(PermissionError, match="denied"):
+        with store.exclusive_lock(lock_path):
+            pass
+
+
+def test_windows_missing_lock_permission_error_is_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = initialized_service(tmp_path).store
+    lock_path = store.forge_dir / "tasks" / ".permission.lock"
+    monkeypatch.setattr(storage_module.os, "name", "nt")
+    monkeypatch.setattr(
+        storage_module.os,
+        "open",
+        lambda _path, _flags: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    with pytest.raises(PermissionError, match="denied"):
+        with store.exclusive_lock(lock_path):
+            pass
+
+
 def test_transition_rejects_stale_revision(tmp_path: Path) -> None:
     actual = initialized_service(tmp_path)
     task = actual.create_task(

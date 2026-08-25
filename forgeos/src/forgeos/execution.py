@@ -20,6 +20,7 @@ from .execution_records import (
     StepState,
 )
 from .git_evidence import GitEvidenceService, GitSnapshot
+from .model_input import MODEL_ITEM_BYTE_LIMIT, ModelInput, assemble_turn_input, bounded_model_text
 from .models import ForgeTask, TaskStatus
 from .policy import PolicyEngine
 from .recovery import CancellationService
@@ -31,7 +32,7 @@ class CodexGateway(Protocol):
 
     def run_turn(
         self,
-        prompt: str,
+        prompt: ModelInput,
         *,
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -125,16 +126,21 @@ class ForgeExecutionService:
                     "truncated": package.truncated,
                 },
             )
+            actual_prompt = assemble_turn_input(
+                task_id=task.id,
+                title=task.title,
+                objective=task.objective,
+                acceptance_criteria=task.acceptance_criteria,
+                constraints=task.constraints,
+                runtime_items=package.runtime_items(),
+                custom_prompt=prompt,
+            )
             task = self._prepare_for_execution(task)
         except Exception as exc:
             self._record_failed_attempt(attempt, exc)
             raise
 
-        actual_prompt = prompt or _task_prompt(task)
-        actual_instructions = _combine_instructions(
-            self.developer_instructions,
-            package.developer_instructions(),
-        )
+        actual_instructions = _bounded_instructions(self.developer_instructions)
         try:
             result, attempt, task = self._run_codex(
                 task,
@@ -178,7 +184,7 @@ class ForgeExecutionService:
                 status=step_status,
                 started_at=attempt.started_at or attempt.created_at,
                 finished_at=self.forge.clock(),
-                input_summary={"prompt_sha256": hashlib.sha256(actual_prompt.encode()).hexdigest()},
+                input_summary={"prompt_sha256": _prompt_sha256(actual_prompt)},
                 output_summary={
                     "runtime_status": result.status,
                     "item_count": len(result.items),
@@ -250,10 +256,10 @@ class ForgeExecutionService:
     def _run_codex(
         self,
         task: ForgeTask,
-        actual_prompt: str,
+        actual_prompt: ModelInput,
         attempt: ExecutionAttempt,
         *,
-        developer_instructions: str,
+        developer_instructions: str | None,
     ) -> tuple[CodexTurnResult, ExecutionAttempt, ForgeTask]:
         controlled = getattr(self.codex, "run_turn_controlled", None)
         if not callable(controlled):
@@ -389,20 +395,7 @@ class ForgeExecutionService:
         return task
 
 
-def _task_prompt(task: ForgeTask) -> str:
-    criteria = "\n".join(f"- {item}" for item in task.acceptance_criteria)
-    constraints = "\n".join(f"- {item}" for item in task.constraints) or "- None declared"
-    return (
-        f"ForgeTask {task.id}: {task.title}\n\n"
-        f"Objective:\n{task.objective}\n\n"
-        f"Acceptance criteria:\n{criteria}\n\n"
-        f"Constraints:\n{constraints}\n\n"
-        "Implement or repair the task in the current workspace. "
-        "Do not claim ForgeTask acceptance; ForgeOS validates independently."
-    )
-
-
-def _execution_record(task_id: str, prompt: str, result: CodexTurnResult) -> ExecutionRecord:
+def _execution_record(task_id: str, prompt: ModelInput, result: CodexTurnResult) -> ExecutionRecord:
     response = result.final_response
     if response is not None and len(response) > 20_000:
         response = response[:20_000] + "\n[TRUNCATED BY FORGEOS]"
@@ -411,7 +404,7 @@ def _execution_record(task_id: str, prompt: str, result: CodexTurnResult) -> Exe
         thread_id=result.thread_id,
         turn_id=result.turn_id,
         runtime_status=result.status,
-        prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
+        prompt_sha256=_prompt_sha256(prompt),
         final_response=response,
         error_message=_bounded_optional(result.error_message, maximum=2_000),
         started_at=result.started_at,
@@ -462,10 +455,14 @@ def _context_step(package: ContextPackage) -> ExecutionStepResult:
     )
 
 
-def _combine_instructions(base: str | None, forge_context: str) -> str:
-    if base is None or not base.strip():
-        return forge_context
-    return f"{base.strip()}\n\n{forge_context}"
+def _bounded_instructions(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    return bounded_model_text(value.strip(), maximum_bytes=MODEL_ITEM_BYTE_LIMIT)
+
+
+def _prompt_sha256(prompt: ModelInput) -> str:
+    return hashlib.sha256(prompt.canonical_bytes()).hexdigest()
 
 
 def _bounded_optional(value: str | None, *, maximum: int) -> str | None:

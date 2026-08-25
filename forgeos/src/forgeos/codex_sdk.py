@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .execution_events import CodexProgressEvent, CodexTurnControl, SdkTurnHandle
+from .model_input import MODEL_ITEM_BYTE_LIMIT, ModelInput, bounded_model_text
 
 
 class WorkspaceAccess(str, Enum):
@@ -78,9 +79,9 @@ class CodexSdkUnavailableError(CodexSdkIntegrationError):
 class _SdkThread(Protocol):
     id: str
 
-    def run(self, input: str, **kwargs: Any) -> Any: ...
+    def run(self, input: Any, **kwargs: Any) -> Any: ...
 
-    def turn(self, input: str, **kwargs: Any) -> SdkTurnHandle: ...
+    def turn(self, input: Any, **kwargs: Any) -> SdkTurnHandle: ...
 
 
 class _SdkClient(Protocol):
@@ -99,10 +100,23 @@ TurnStartedCallback = Callable[[CodexTurnControl], None]
 class _OfficialClientAdapter:
     """Bind ForgeOS security defaults to every SDK thread lifecycle call."""
 
-    def __init__(self, client: Any, *, approval_mode: Any, sandbox: Any) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        approval_mode: Any,
+        sandbox: Any,
+        text_input_type: Any,
+    ) -> None:
         self._client = client
         self._approval_mode = approval_mode
         self._sandbox = sandbox
+        self._text_input_type = text_input_type
+
+    def prepare_input(self, input: str | ModelInput) -> Any:
+        if isinstance(input, ModelInput):
+            return [self._text_input_type(text=item.text) for item in input.items]
+        return input
 
     def thread_start(self, **kwargs: Any) -> _SdkThread:
         return self._client.thread_start(
@@ -160,15 +174,14 @@ class CodexSdkGateway:
 
     def run_turn(
         self,
-        prompt: str,
+        prompt: str | ModelInput,
         *,
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
     ) -> CodexTurnResult:
         """Run one turn on a new thread or resume a persisted Codex thread."""
 
-        if not prompt.strip():
-            raise ValueError("prompt must not be empty")
+        _validate_prompt(prompt)
         if thread_id is not None and not thread_id.strip():
             raise ValueError("thread_id must not be empty")
 
@@ -186,12 +199,12 @@ class CodexSdkGateway:
         run_options: dict[str, Any] = {}
         if output_schema is not None:
             run_options["output_schema"] = output_schema
-        result = thread.run(prompt, **run_options)
+        result = thread.run(_prepare_prompt(client, prompt), **run_options)
         return _normalize_turn_result(thread.id, result)
 
     def run_turn_controlled(
         self,
-        prompt: str,
+        prompt: str | ModelInput,
         *,
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -201,29 +214,28 @@ class CodexSdkGateway:
     ) -> CodexTurnResult:
         """Run through the public TurnHandle API for progress and control."""
 
-        if not prompt.strip():
-            raise ValueError("prompt must not be empty")
+        _validate_prompt(prompt)
         if thread_id is not None and not thread_id.strip():
             raise ValueError("thread_id must not be empty")
 
         self.start()
         client = self._require_client()
-        thread_options = _thread_options(
-            self.settings,
-            developer_instructions=developer_instructions,
-        )
         if thread_id is None:
+            thread_options = _thread_options(
+                self.settings,
+                developer_instructions=developer_instructions,
+            )
             thread = client.thread_start(
                 **thread_options,
                 ephemeral=self.settings.ephemeral_threads,
             )
         else:
-            thread = client.thread_resume(thread_id, **thread_options)
+            thread = client.thread_resume(thread_id, cwd=str(self.settings.workspace))
 
         run_options: dict[str, Any] = {}
         if output_schema is not None:
             run_options["output_schema"] = output_schema
-        handle = thread.turn(prompt, **run_options)
+        handle = thread.turn(_prepare_prompt(client, prompt), **run_options)
         control = CodexTurnControl(thread_id=thread.id, handle=handle)
         if on_started is not None:
             on_started(control)
@@ -242,7 +254,7 @@ class CodexSdkGateway:
 
 def _create_official_client(settings: CodexSdkSettings) -> _SdkClient:
     try:
-        from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox
+        from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox, TextInput
     except ImportError as exc:
         raise CodexSdkUnavailableError(
             "The official Codex Python SDK is not installed. Install the "
@@ -267,7 +279,12 @@ def _create_official_client(settings: CodexSdkSettings) -> _SdkClient:
         WorkspaceAccess.read_only: Sandbox.read_only,
         WorkspaceAccess.workspace_write: Sandbox.workspace_write,
     }[settings.workspace_access]
-    return _OfficialClientAdapter(client, approval_mode=approval_mode, sandbox=sandbox)
+    return _OfficialClientAdapter(
+        client,
+        approval_mode=approval_mode,
+        sandbox=sandbox,
+        text_input_type=TextInput,
+    )
 
 
 def _thread_options(
@@ -282,9 +299,29 @@ def _thread_options(
         options["model"] = settings.model
     actual_instructions = developer_instructions or settings.developer_instructions
     if actual_instructions is not None:
-        options["developer_instructions"] = actual_instructions
+        options["developer_instructions"] = bounded_model_text(
+            actual_instructions,
+            maximum_bytes=MODEL_ITEM_BYTE_LIMIT,
+        )
 
     return options
+
+
+def _validate_prompt(prompt: str | ModelInput) -> None:
+    if isinstance(prompt, str) and not prompt.strip():
+        raise ValueError("prompt must not be empty")
+
+
+def _prepare_prompt(client: _SdkClient, prompt: str | ModelInput) -> Any:
+    bounded = (
+        bounded_model_text(prompt, maximum_bytes=MODEL_ITEM_BYTE_LIMIT)
+        if isinstance(prompt, str)
+        else prompt
+    )
+    prepare = getattr(client, "prepare_input", None)
+    if callable(prepare):
+        return prepare(bounded)
+    return bounded
 
 
 def _normalize_turn_result(thread_id: str, result: Any) -> CodexTurnResult:

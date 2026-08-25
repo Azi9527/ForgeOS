@@ -227,7 +227,7 @@ class ForgeStore:
                     lock_age = time.time() - safe_lock.stat().st_mtime
                 except FileNotFoundError:
                     if isinstance(exc, PermissionError):
-                        raise
+                        raise exc from None
                     continue
                 if lock_age > 60:
                     try:

@@ -59,18 +59,31 @@ def test_context_is_deterministic_bounded_and_keeps_user_authority_separate(
     second = builder.build(task, git)
 
     assert first == second
-    assert first.total_bytes <= 32_768
-    assert all(fragment.size_bytes <= 8_192 for fragment in first.fragments)
+    assert first.total_bytes <= 6_000
+    assert all(fragment.size_bytes <= 1_000 for fragment in first.fragments)
     assert [fragment.authority for fragment in first.fragments] == [
         ContextAuthority.runtime_data,
         ContextAuthority.user,
-        ContextAuthority.developer,
+        ContextAuthority.runtime_data,
         ContextAuthority.runtime_data,
     ]
-    instructions = first.developer_instructions()
-    assert task.objective not in instructions
-    assert "super-secret-value" not in instructions
-    assert "[REDACTED]" in instructions
+    context = "\n".join(item.text for item in first.runtime_items())
+    assert task.objective not in context
+    assert "super-secret-value" not in context
+    assert "[REDACTED]" in context
+    assert sum(len(item.text.encode("utf-8")) for item in first.runtime_items()) <= 2_700
+    assert all(len(item.text.encode("utf-8")) <= 900 for item in first.runtime_items())
+
+
+def test_git_context_is_stable_across_snapshot_identifiers(tmp_path: Path) -> None:
+    service, task, git, clock = fixture(tmp_path)
+    builder = ContextPackageBuilder(service.store, clock=clock)
+
+    first = builder.build(task, git)
+    second = builder.build(task, replace(git, id="git-another-capture"))
+
+    assert first.content_sha256 == second.content_sha256
+    assert first.runtime_items() == second.runtime_items()
 
 
 def test_context_truncates_at_fragment_and_package_limits(tmp_path: Path) -> None:

@@ -2,14 +2,14 @@
 
 ## Candidate commit
 
-- [ ] `git status --short` contains no `.forge/`, credentials, build output, or unrelated files.
-- [ ] `upstream` is the official OpenAI Codex repository and `origin` is the confirmed ForgeOS repo.
-- [ ] Package version, runtime constant, manifest, changelog, and tag agree.
-- [ ] Ruff check and format check pass.
-- [ ] All ForgeOS tests pass on the local supported Python baseline.
-- [ ] JavaScript syntax checks pass.
-- [ ] Wheel and sdist pass `forgeos.release_artifacts` and `SHA256SUMS` is generated.
-- [ ] Diff review confirms no Codex Core/SDK/Sandbox/Approval weakening.
+- [x] `git status --short` contains no `.forge/`, credentials, build output, or unrelated files.
+- [x] `upstream` is the official OpenAI Codex repository and `origin` is the confirmed ForgeOS repo.
+- [x] Package version, runtime constant, manifest, changelog, and tag agree.
+- [x] Ruff check and format check pass.
+- [x] All ForgeOS tests pass on the local supported Python baseline (116 tests).
+- [x] JavaScript syntax checks pass.
+- [x] Wheel and sdist pass `forgeos.release_artifacts` and `SHA256SUMS` is generated.
+- [x] Diff review confirms no Codex Core/SDK/Sandbox/Approval weakening.
 - [ ] Release commit is reviewed through a pull request and remote CI matrix is green.
 
 ## Repository configuration

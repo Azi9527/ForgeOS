@@ -11,8 +11,9 @@ import pytest
 from forgeos.codex_sdk import CodexTurnResult
 from forgeos.control import ForgeControlService, JobState
 from forgeos.errors import ForgeConflictError
-from forgeos.execution_events import CodexProgressEvent
+from forgeos.execution_events import CodexProgressEvent, CodexTurnControl
 from forgeos.execution_records import AttemptState
+from forgeos.model_input import ModelInput
 from forgeos.models import TaskStatus
 
 NOW = "2026-08-24T00:00:00Z"
@@ -25,7 +26,7 @@ class FakeGateway:
 
     def run_turn(
         self,
-        prompt: str,
+        prompt: ModelInput,
         *,
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -56,7 +57,7 @@ class BlockingGateway(FakeGateway):
 
     def run_turn(
         self,
-        prompt: str,
+        prompt: ModelInput,
         *,
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -72,6 +73,7 @@ class FakeActiveControl:
     release: threading.Event
     thread_id: str = "thread-controlled"
     turn_id: str = "turn-controlled"
+    id: str = "turn-controlled"
     steers: list[str] = field(default_factory=list)
     interrupt_count: int = 0
 
@@ -96,7 +98,7 @@ class ControlledBlockingGateway(FakeGateway):
 
     def run_turn_controlled(
         self,
-        prompt: str,
+        prompt: ModelInput,
         *,
         thread_id: str | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -104,9 +106,10 @@ class ControlledBlockingGateway(FakeGateway):
         on_progress: Any = None,
         on_started: Any = None,
     ) -> CodexTurnResult:
-        del prompt, thread_id, output_schema
-        assert developer_instructions is not None
-        on_started(self.control)
+        del thread_id, output_schema
+        assert "ForgeOS runtime evidence follows" in "\n".join(prompt.texts())
+        assert developer_instructions is None
+        on_started(CodexTurnControl(thread_id=self.control.thread_id, handle=self.control))
         on_progress(CodexProgressEvent(1, "turn/started", {"phase": "started"}))
         self.started.set()
         if not self.release.wait(5):
@@ -273,6 +276,25 @@ def test_control_stream_progress_steer_interrupt_and_persist_recovery(
         assert any(
             event["event_type"] == "codex.turn.interrupt_requested" for event in detail["audit"]
         )
+    finally:
+        gateway.release.set()
+        control.close()
+
+
+def test_control_rejects_oversized_steer_before_sdk_call(tmp_path: Path) -> None:
+    gateway = ControlledBlockingGateway()
+    control = initialized_control(tmp_path, gateway)
+    try:
+        task = create_task(control)
+        submitted = control.submit_run(task["id"], {})
+        assert gateway.started.wait(2)
+
+        with pytest.raises(ValueError, match="steer input exceeds 900 bytes"):
+            control.steer(task["id"], {"input": "中" * 301})
+
+        assert gateway.control.steers == []
+        control.interrupt(task["id"])
+        assert control.jobs.wait(submitted["id"]).state is JobState.succeeded
     finally:
         gateway.release.set()
         control.close()

@@ -4,6 +4,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .model_input import MODEL_ITEM_BYTE_LIMIT
+
 
 @dataclass(frozen=True, slots=True)
 class CodexProgressEvent:
@@ -61,8 +63,8 @@ class CodexTurnControl:
         normalized = input.strip()
         if not normalized:
             raise ValueError("steer input must not be empty")
-        if len(normalized.encode("utf-8")) > 10_000:
-            raise ValueError("steer input exceeds 10000 bytes")
+        if len(normalized.encode("utf-8")) > MODEL_ITEM_BYTE_LIMIT:
+            raise ValueError(f"steer input exceeds {MODEL_ITEM_BYTE_LIMIT} bytes")
         with self._lock:
             if self._interrupt_requested:
                 raise ValueError("cannot steer after interrupt was requested")

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from forgeos import ApprovalPolicy, CodexSdkGateway, CodexSdkSettings, WorkspaceAccess
+from forgeos.model_input import ModelInput, ModelTextItem
 
 
 class Status(str, Enum):
@@ -149,6 +150,12 @@ class ControlledFakeClient(FakeClient):
         self.threads.append(thread)
         return thread
 
+    def thread_resume(self, thread_id: str, **kwargs: Any) -> ControlledFakeThread:
+        self.resumed.append((thread_id, kwargs))
+        thread = ControlledFakeThread(thread_id)
+        self.threads.append(thread)
+        return thread
+
 
 def settings(tmp_path: Path) -> CodexSdkSettings:
     return CodexSdkSettings(workspace=tmp_path)
@@ -242,6 +249,50 @@ def test_controlled_turn_streams_progress_and_exposes_control(tmp_path: Path) ->
     assert client.threads[0].handle.interrupts == 1
 
 
+def test_controlled_resume_injects_fresh_context_in_turn_not_thread_options(
+    tmp_path: Path,
+) -> None:
+    client = ControlledFakeClient()
+    gateway = CodexSdkGateway(settings(tmp_path), client_factory=lambda _settings: client)
+
+    gateway.run_turn_controlled(
+        "Fresh bounded runtime context",
+        thread_id="thread-existing",
+        developer_instructions="must not become a resume override",
+    )
+
+    assert client.resumed == [("thread-existing", {"cwd": str(tmp_path.resolve())})]
+    assert client.threads[0].runs == [("Fresh bounded runtime context", {})]
+
+
+def test_sdk_boundary_bounds_direct_model_input(tmp_path: Path) -> None:
+    client = FakeClient()
+    gateway = CodexSdkGateway(settings(tmp_path), client_factory=lambda _settings: client)
+
+    gateway.run_turn("中" * 10_000)
+
+    prompt, _options = client.threads[0].runs[0]
+    assert len(prompt.encode("utf-8")) <= 900
+    assert "[TRUNCATED BY FORGEOS]" in prompt
+
+
+def test_controlled_boundary_bounds_prompt_and_developer_instructions(tmp_path: Path) -> None:
+    client = ControlledFakeClient()
+    gateway = CodexSdkGateway(settings(tmp_path), client_factory=lambda _settings: client)
+
+    gateway.run_turn_controlled(
+        "中" * 10_000,
+        developer_instructions="d" * 10_000,
+    )
+
+    prompt, _options = client.threads[0].runs[0]
+    instructions = client.started[0]["developer_instructions"]
+    assert len(prompt.encode("utf-8")) <= 900
+    assert len(instructions.encode("utf-8")) <= 900
+    assert "[TRUNCATED BY FORGEOS]" in prompt
+    assert "[TRUNCATED BY FORGEOS]" in instructions
+
+
 @pytest.mark.parametrize("value", ["", "   "])
 def test_rejects_empty_prompt(tmp_path: Path, value: str) -> None:
     gateway = CodexSdkGateway(settings(tmp_path), client_factory=lambda _settings: FakeClient())
@@ -274,16 +325,21 @@ def test_official_client_receives_forgeos_security_defaults(
         def __init__(self, **kwargs: Any) -> None:
             captured_config.update(kwargs)
 
+    @dataclass
+    class FakeTextInput:
+        text: str
+
     fake_module = SimpleNamespace(
         ApprovalMode=SimpleNamespace(deny_all="sdk-deny", auto_review="sdk-review"),
         Codex=lambda _config: raw_client,
         CodexConfig=FakeCodexConfig,
         Sandbox=SimpleNamespace(read_only="sdk-read", workspace_write="sdk-write"),
+        TextInput=FakeTextInput,
     )
     monkeypatch.setitem(__import__("sys").modules, "openai_codex", fake_module)
 
     with CodexSdkGateway(settings(tmp_path)) as gateway:
-        gateway.run_turn("Inspect the repository")
+        gateway.run_turn(ModelInput((ModelTextItem.create("task", "Inspect the repository"),)))
 
     assert captured_config["cwd"] == str(tmp_path.resolve())
     assert captured_config["experimental_api"] is False
@@ -295,4 +351,5 @@ def test_official_client_receives_forgeos_security_defaults(
             "sandbox": "sdk-write",
         }
     ]
+    assert raw_client.threads[0].runs == [([FakeTextInput("Inspect the repository")], {})]
     assert raw_client.close_count == 1
