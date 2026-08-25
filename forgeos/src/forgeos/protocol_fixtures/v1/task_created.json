@@ -1,0 +1,26 @@
+{
+  "acceptance": null,
+  "acceptance_criteria": [
+    "fixture round-trips"
+  ],
+  "blocked_from": null,
+  "codex_thread_id": null,
+  "constraints": [],
+  "created_at": "2026-08-25T00:00:00Z",
+  "id": "FORGE-0001",
+  "last_turn_id": null,
+  "objective": "Prove protocol compatibility",
+  "priority": "NORMAL",
+  "related_modules": [],
+  "repair_attempts": 0,
+  "review": null,
+  "revision": 0,
+  "risk": "MEDIUM",
+  "schema_version": 1,
+  "status": "CREATED",
+  "task_report_id": null,
+  "task_type": "TEST",
+  "title": "Protocol fixture",
+  "updated_at": "2026-08-25T00:00:00Z",
+  "validation": null
+}

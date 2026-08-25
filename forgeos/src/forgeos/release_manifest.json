@@ -1,0 +1,7 @@
+{
+  "bundle_schema_version": 1,
+  "package_version": "0.2.0",
+  "protocol_version": 1,
+  "schema_version": 1,
+  "supported_codex_sdk": ">=0.146,<0.148"
+}

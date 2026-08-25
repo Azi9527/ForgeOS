@@ -7,6 +7,14 @@ on:
       - "forgeos/**"
       - "docs/forgeos/**"
       - ".gitignore"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/forgeos-*.yml"
+      - "forgeos/**"
+      - "docs/forgeos/**"
+      - ".gitignore"
   workflow_dispatch:
 
 permissions:
@@ -87,4 +95,3 @@ jobs:
             forgeos/dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
-
