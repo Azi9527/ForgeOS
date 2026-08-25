@@ -1,0 +1,11 @@
+{
+  "effect": "DENY",
+  "id": "project.fixture-deny",
+  "name": "Fixture deny rule",
+  "patterns": [
+    "production/**"
+  ],
+  "reason": "Protocol fixture",
+  "schema_version": 1,
+  "target": "TASK_PATH"
+}

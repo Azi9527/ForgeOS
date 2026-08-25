@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="forge-token" content="__FORGE_TOKEN__">
+  <title>ForgeOS Control</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">AI NATIVE ENGINEERING HARNESS</p>
+        <h1>ForgeOS <span>Control</span></h1>
+      </div>
+      <div class="runtime">
+        <span id="connection-dot" class="dot"></span>
+        <div><strong id="project-name">连接中</strong><small id="workspace">Local runtime</small></div>
+      </div>
+    </header>
+
+    <main>
+      <section id="init-panel" class="panel hidden">
+        <div class="section-heading">
+          <div><p class="eyebrow">PROJECT BOOTSTRAP</p><h2>初始化工程控制层</h2></div>
+          <p>仅在当前目录创建 <code>.forge/</code>，不会修改 Codex Core。</p>
+        </div>
+        <form id="init-form" class="form-grid">
+          <label>项目名称<input name="name" required maxlength="120" placeholder="My Project"></label>
+          <label>验证名称<input name="check_name" value="tests" required></label>
+          <label>Validation Level<select name="check_level"><option>L1_BUILD</option><option selected>L2_UNIT</option><option>L3_INTEGRATION</option></select></label>
+          <label class="wide">验证命令（JSON argv）
+            <input name="check_argv" value='["python", "-m", "pytest"]' required>
+          </label>
+          <button class="primary" type="submit">初始化 ForgeOS</button>
+        </form>
+      </section>
+
+      <section id="workspace-panel" class="workspace-grid hidden">
+        <aside class="panel task-rail">
+          <div class="rail-header">
+            <div><p class="eyebrow">FORGE TASKS</p><h2>任务</h2></div>
+            <button id="new-task-button" class="icon-button" title="新建任务">＋</button>
+          </div>
+          <div id="status-summary" class="status-summary"></div>
+          <div id="task-list" class="task-list"></div>
+        </aside>
+
+        <section class="panel detail-panel">
+          <div id="empty-state" class="empty-state">
+            <div class="forge-mark">F</div>
+            <h2>选择一个 ForgeTask</h2>
+            <p>查看执行、验证、审核与验收证据。</p>
+          </div>
+          <div id="task-detail" class="hidden"></div>
+        </section>
+
+        <aside class="panel activity-panel">
+          <div class="section-heading compact"><div><p class="eyebrow">LIVE ACTIVITY</p><h2>活动</h2></div></div>
+          <div class="operations-box">
+            <p class="eyebrow">N4 OPERATIONS</p>
+            <div id="operations-status" class="evidence">加载中</div>
+            <div class="operations-actions">
+              <button id="integrity-scan-button" class="secondary">完整性扫描</button>
+              <button id="migration-button" class="secondary">应用迁移</button>
+            </div>
+          </div>
+          <div class="operations-box release-box">
+            <p class="eyebrow">N5 RELEASE & OPERATOR</p>
+            <div id="release-status" class="evidence">加载中</div>
+            <div class="operations-actions">
+              <button id="release-check-button" class="primary">发布检查</button>
+              <button id="operator-button" class="secondary">Memory / Policy / Audit</button>
+            </div>
+          </div>
+          <div id="job-list" class="activity-list"></div>
+          <div id="audit-list" class="activity-list audit-list"></div>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="task-dialog">
+    <form id="task-form" method="dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">NEW FORGE TASK</p><h2>创建工程任务</h2></div><button value="cancel" class="icon-button">×</button></div>
+      <label>标题<input name="title" required maxlength="200"></label>
+      <div class="two-column">
+        <label>类型<select name="task_type"><option>FEATURE</option><option>FIX</option><option>REFACTOR</option><option>REVIEW</option><option>DOC</option><option>TEST</option></select></label>
+        <label>风险<select name="risk"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option></select></label>
+      </div>
+      <label>目标<textarea name="objective" required rows="4"></textarea></label>
+      <label>验收条件（每行一条）<textarea name="acceptance" required rows="4"></textarea></label>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="create-task-submit" value="default" class="primary">创建任务</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="decision-dialog">
+    <form id="decision-form" method="dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">HUMAN AUTHORITY</p><h2 id="decision-title">确认工程决策</h2></div><button value="cancel" class="icon-button">×</button></div>
+      <label><span id="decision-actor-label">操作人</span><input name="actor" value="local-user" required maxlength="120"></label>
+      <label>说明<textarea name="summary" rows="4" maxlength="2000"></textarea></label>
+      <div id="decision-fields"></div>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="decision-submit" value="default" class="primary">确认</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="operator-dialog" class="operator-dialog">
+    <div class="dialog-heading">
+      <div><p class="eyebrow">N5 OPERATOR WORKSPACE</p><h2>工程知识与策略控制</h2></div>
+      <button id="operator-close" class="icon-button" aria-label="关闭">×</button>
+    </div>
+    <div class="operator-tabs" role="tablist">
+      <button class="secondary active" data-operator-tab="memory">Memory</button>
+      <button class="secondary" data-operator-tab="policy">Policy</button>
+      <button class="secondary" data-operator-tab="audit">Audit</button>
+    </div>
+    <section id="operator-memory" class="operator-pane">
+      <form id="memory-create-form" class="operator-form">
+        <div class="two-column">
+          <label>类型<select name="kind"><option>DECISION</option><option>FAILURE</option><option>PATTERN</option><option>TASK</option></select></label>
+          <label>创建人<input name="created_by" value="local-user" required maxlength="120"></label>
+        </div>
+        <label>标题<input name="title" required maxlength="200"></label>
+        <label>内容<textarea name="body" required rows="3" maxlength="8192"></textarea></label>
+        <label>Tags（逗号分隔）<input name="tags" placeholder="release, operator"></label>
+        <button class="primary" type="submit">创建 Draft Memory</button>
+      </form>
+      <div class="operator-authority">
+        <label>决策人<input id="memory-actor" value="local-user" maxlength="120"></label>
+        <label>决策说明<input id="memory-reason" value="人工复核" maxlength="2000"></label>
+      </div>
+      <div id="memory-list" class="operator-list"></div>
+    </section>
+    <section id="operator-policy" class="operator-pane hidden">
+      <form id="policy-create-form" class="operator-form">
+        <div class="two-column">
+          <label>Policy ID<input name="id" value="project." required maxlength="120"></label>
+          <label>目标<select name="target"><option>TASK_PATH</option><option>VALIDATION_COMMAND</option></select></label>
+        </div>
+        <label>名称<input name="name" required maxlength="200"></label>
+        <label>Patterns（每行一条）<textarea name="patterns" required rows="3"></textarea></label>
+        <label>原因<input name="reason" required maxlength="2000"></label>
+        <label>创建人<input name="created_by" value="local-user" required maxlength="120"></label>
+        <button class="primary" type="submit">创建 Additive DENY</button>
+      </form>
+      <div class="operator-authority">
+        <label>退役人<input id="policy-actor" value="local-user" maxlength="120"></label>
+        <label>退役说明<input id="policy-reason" value="规则已被替代" maxlength="2000"></label>
+      </div>
+      <div id="policy-list" class="operator-list"></div>
+    </section>
+    <section id="operator-audit" class="operator-pane hidden">
+      <form id="audit-query-form" class="audit-filter">
+        <label>Task ID<input name="task_id" placeholder="FORGE-0001"></label>
+        <label>Event Type<input name="event_type" placeholder="task.created"></label>
+        <label>Actor<select name="actor"><option value="">全部</option><option>human</option><option>system</option><option>validation</option><option>reviewer</option></select></label>
+        <button class="secondary" type="submit">查询审计</button>
+      </form>
+      <div id="operator-audit-list" class="operator-list"></div>
+    </section>
+  </dialog>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/assets/operator.js"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

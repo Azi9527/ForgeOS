@@ -1,0 +1,167 @@
+name: ForgeOS Release
+
+on:
+  push:
+    tags:
+      - "forgeos-v*"
+  workflow_dispatch:
+    inputs:
+      publish_target:
+        description: Optional non-production publication target
+        required: true
+        type: choice
+        default: none
+        options:
+          - none
+          - testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  build-release:
+    name: Build, verify, attest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: forgeos/pyproject.toml
+      - name: Install build and verification tools
+        run: python -m pip install --disable-pip-version-check build -e "./forgeos[test]" ruff
+      - name: Verify source
+        run: |
+          python -m ruff check forgeos/src forgeos/tests
+          python -m ruff format --check forgeos/src forgeos/tests
+          python -m pytest forgeos/tests
+          node --check forgeos/src/forgeos/web/app.js
+          node --check forgeos/src/forgeos/web/operator.js
+      - name: Build wheel and source distribution
+        run: python -m build forgeos --outdir forgeos/dist
+      - name: Verify tag and distribution
+        if: github.ref_type == 'tag'
+        run: >-
+          python -m forgeos.release_artifacts
+          --project-root forgeos
+          --dist forgeos/dist
+          --tag "${{ github.ref_name }}"
+          --write-checksums
+      - name: Verify manually dispatched distribution
+        if: github.ref_type != 'tag'
+        run: >-
+          python -m forgeos.release_artifacts
+          --project-root forgeos
+          --dist forgeos/dist
+          --write-checksums
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: forgeos/dist
+          format: spdx-json
+          output-file: forgeos/dist/forgeos-harness.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            forgeos/dist/*.whl
+            forgeos/dist/*.tar.gz
+      - name: Attest SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            forgeos/dist/*.whl
+            forgeos/dist/*.tar.gz
+          sbom-path: forgeos/dist/forgeos-harness.spdx.json
+      - name: Upload release evidence
+        uses: actions/upload-artifact@v5
+        with:
+          name: forgeos-release-evidence
+          path: forgeos/dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_target == 'testpypi'
+    needs: build-release
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/forgeos-harness
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: forgeos-release-evidence
+          path: release-evidence
+      - name: Select Python distributions
+        run: |
+          mkdir python-distributions
+          cp release-evidence/*.whl python-distributions/
+          cp release-evidence/*.tar.gz python-distributions/
+      - name: Publish with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python-distributions/
+          repository-url: https://test.pypi.org/legacy/
+          print-hash: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.ref_type == 'tag'
+    needs: build-release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/forgeos-harness
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: forgeos-release-evidence
+          path: release-evidence
+      - name: Select Python distributions
+        run: |
+          mkdir python-distributions
+          cp release-evidence/*.whl python-distributions/
+          cp release-evidence/*.tar.gz python-distributions/
+      - name: Publish with Trusted Publishing and attestations
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python-distributions/
+          print-hash: true
+
+  github-release:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: [build-release, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: forgeos-release-evidence
+          path: release-evidence
+      - name: Create immutable release record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}"
+          release-evidence/*
+          --repo "${{ github.repository }}"
+          --verify-tag
+          --generate-notes
