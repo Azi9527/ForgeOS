@@ -108,6 +108,8 @@ ForgeOS V1 本地单 Agent harness 已达到 release-candidate 功能边界。�
 
 R1 已完成：公开 ForgeOS `origin`、PR 评审、3 OS × Python 3.10–3.13 CI matrix、wheel/sdist 内容门禁、SHA-256、SPDX SBOM、GitHub build provenance/SBOM attestations、`forgeos-v0.2.0` tag 与 GitHub Release。V1 暂不发布 PyPI；TestPyPI/PyPI 仅保留为未来手动可选目标，不阻塞 GitHub Release。
 
+V1.1 的第一个切片 **Real Project Pilot & Operator UX** 已完成：ForgeOS 自身作为真实工程试点，增加 Doctor 就绪摘要、逐状态推荐下一步、诊断与 Task Report 导出，以及可选的 `forge ui --open-browser`。它仍是本地、单 Agent、文件持久化的薄控制面，没有引入远程服务、数据库、Multi-Agent 或 Model Router。实现计划与验证证据见 [V1_1_DEVELOPMENT_PLAN.md](V1_1_DEVELOPMENT_PLAN.md) 和 [V1_1_VALIDATION_REPORT.md](V1_1_VALIDATION_REPORT.md)。下一切片是在一个刻意受限、非破坏性的真实任务上跑通 CREATED → DONE，并把生成的 Task Report 作为 `0.2.1` 候选发布证据。
+
 ## 7. V1 Exit Criteria
 
 - `.forge/` protocol 有 schema、版本与迁移策略。

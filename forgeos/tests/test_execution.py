@@ -36,7 +36,11 @@ class FakeGateway:
 
 
 def result(
-    *, thread_id: str = "thread-1", turn_id: str = "turn-1", status: str = "completed"
+    *,
+    thread_id: str = "thread-1",
+    turn_id: str = "turn-1",
+    status: str = "completed",
+    replaced_thread_id: str | None = None,
 ) -> CodexTurnResult:
     return CodexTurnResult(
         thread_id=thread_id,
@@ -49,6 +53,7 @@ def result(
         duration_ms=1_000,
         items=(),
         usage={"totalTokens": 10},
+        replaced_thread_id=replaced_thread_id,
     )
 
 
@@ -98,6 +103,39 @@ def test_repair_resumes_same_codex_thread(tmp_path: Path) -> None:
     assert gateway.calls[0][1] is None
     assert gateway.calls[1][1] == "thread-1"
     assert second.last_turn_id == "turn-2"
+
+
+def test_missing_rollout_rebinds_blocked_task_to_replacement_thread(tmp_path: Path) -> None:
+    forge, task_id = task_service(tmp_path)
+    gateway = FakeGateway(
+        [
+            result(status="failed"),
+            result(
+                thread_id="thread-2",
+                turn_id="turn-2",
+                replaced_thread_id="thread-1",
+            ),
+        ]
+    )
+    execution = ForgeExecutionService(forge, gateway)
+
+    blocked = execution.run_task(task_id)
+    recovered = execution.run_task(blocked.id)
+
+    assert blocked.status is TaskStatus.blocked
+    assert recovered.status is TaskStatus.validating
+    assert recovered.codex_thread_id == "thread-2"
+    assert recovered.last_turn_id == "turn-2"
+    replacement = [
+        event for event in forge.audit.read_all() if event.event_type == "codex.thread.replaced"
+    ]
+    assert replacement[0].payload == {
+        "previous_thread_id": "thread-1",
+        "thread_id": "thread-2",
+        "turn_id": "turn-2",
+        "reason": "rollout_missing",
+        "revision": recovered.revision - 1,
+    }
 
 
 def test_repair_resume_rebuilds_runtime_context(tmp_path: Path) -> None:

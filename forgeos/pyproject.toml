@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "forgeos-harness"
-version = "0.2.0"
+version = "0.2.1"
 description = "ForgeOS control-layer integration for the OpenAI Codex Python SDK"
 readme = "README.md"
 requires-python = ">=3.10"

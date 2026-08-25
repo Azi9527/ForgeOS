@@ -23,6 +23,7 @@ REQUIRED_PACKAGE_FILES = (
     "forgeos/web/index.html",
     "forgeos/web/app.js",
     "forgeos/web/operator.js",
+    "forgeos/web/pilot.js",
     "forgeos/web/styles.css",
 )
 

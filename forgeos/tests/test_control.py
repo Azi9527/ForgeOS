@@ -343,3 +343,66 @@ def test_control_reports_uninitialized_workspace_and_validates_input(tmp_path: P
             control.initialize({"name": "Invalid", "validation_checks": "pytest"})
     finally:
         control.close()
+
+
+def test_control_diagnostics_are_bounded_and_exclude_runtime_credentials(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    control = ForgeControlService(
+        tmp_path,
+        gateway_factory=lambda: gateway,
+        clock=lambda: NOW,
+    )
+    try:
+        control.initialize({"name": "Diagnostics", "validation_checks": []})
+        actual = control.diagnostic_bundle()
+    finally:
+        control.close()
+
+    assert actual["schema_version"] == 1
+    assert actual["generated_at"] == NOW
+    assert actual["status"]["project"]["name"] == "Diagnostics"
+    assert actual["doctor"]["workspace"] == str(tmp_path.resolve())
+    assert actual["recent_jobs"] == []
+    assert "token" not in str(actual).lower()
+
+
+def test_task_detail_orders_chronological_evidence(tmp_path: Path) -> None:
+    control = initialized_control(tmp_path, FakeGateway())
+    try:
+        task = create_task(control)
+        control.forge.store.write_record(
+            f"executions/{task['id']}/z-older.json",
+            {"turn_id": "turn-older", "started_at": 10, "final_response": "older"},
+        )
+        control.forge.store.write_record(
+            f"executions/{task['id']}/a-newer.json",
+            {"turn_id": "turn-newer", "started_at": 20, "final_response": "newer"},
+        )
+        control.forge.store.write_record(
+            "validation/results/z-older.json",
+            {
+                "task_id": task["id"],
+                "report_id": "validation-older",
+                "started_at": "2026-08-24T00:00:01Z",
+                "passed": True,
+            },
+        )
+        control.forge.store.write_record(
+            "validation/results/a-newer.json",
+            {
+                "task_id": task["id"],
+                "report_id": "validation-newer",
+                "started_at": "2026-08-24T00:00:02Z",
+                "passed": True,
+            },
+        )
+
+        detail = control.task_detail(task["id"])
+
+        assert [item["final_response"] for item in detail["executions"]] == ["older", "newer"]
+        assert [item["report_id"] for item in detail["validations"]] == [
+            "validation-older",
+            "validation-newer",
+        ]
+    finally:
+        control.close()

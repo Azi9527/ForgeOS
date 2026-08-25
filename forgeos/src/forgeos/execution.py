@@ -269,6 +269,14 @@ class ForgeExecutionService:
                 thread_id=result.thread_id,
                 turn_id=result.turn_id,
             )
+            if result.replaced_thread_id is not None:
+                task = self.forge.replace_missing_codex_thread(
+                    task.id,
+                    expected_revision=task.revision,
+                    previous_thread_id=result.replaced_thread_id,
+                    thread_id=result.thread_id,
+                    turn_id=result.turn_id,
+                )
             return result, attempt, task
 
         active_attempt = attempt
@@ -281,13 +289,22 @@ class ForgeExecutionService:
                 thread_id=control.thread_id,
                 turn_id=control.turn_id,
             )
-            active_task = self.forge.record_codex_turn(
-                active_task.id,
-                expected_revision=active_task.revision,
-                thread_id=control.thread_id,
-                turn_id=control.turn_id,
-                runtime_status="inProgress",
-            )
+            if control.replaced_thread_id is None:
+                active_task = self.forge.record_codex_turn(
+                    active_task.id,
+                    expected_revision=active_task.revision,
+                    thread_id=control.thread_id,
+                    turn_id=control.turn_id,
+                    runtime_status="inProgress",
+                )
+            else:
+                active_task = self.forge.replace_missing_codex_thread(
+                    active_task.id,
+                    expected_revision=active_task.revision,
+                    previous_thread_id=control.replaced_thread_id,
+                    thread_id=control.thread_id,
+                    turn_id=control.turn_id,
+                )
             if self.on_started is not None:
                 self.on_started(active_attempt, control)
 

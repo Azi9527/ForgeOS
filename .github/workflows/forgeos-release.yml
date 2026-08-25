@@ -46,6 +46,7 @@ jobs:
           python -m pytest forgeos/tests
           node --check forgeos/src/forgeos/web/app.js
           node --check forgeos/src/forgeos/web/operator.js
+          node --check forgeos/src/forgeos/web/pilot.js
       - name: Build wheel and source distribution
         run: python -m build forgeos --outdir forgeos/dist
       - name: Verify tag and distribution

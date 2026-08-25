@@ -209,6 +209,46 @@ class ForgeService:
         )
         return updated
 
+    def replace_missing_codex_thread(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int,
+        previous_thread_id: str,
+        thread_id: str,
+        turn_id: str,
+    ) -> ForgeTask:
+        """Rebind a Task only after Codex confirms the previous rollout is missing."""
+
+        current = self._task_at_revision(task_id, expected_revision)
+        if current.status not in {TaskStatus.implementing, TaskStatus.repairing}:
+            raise ForgeConflictError(
+                f"cannot replace Codex thread while task is {current.status.value}"
+            )
+        if current.codex_thread_id != previous_thread_id or previous_thread_id == thread_id:
+            raise ForgeConflictError(f"task {task_id} Codex thread replacement is inconsistent")
+        updated = replace(
+            current,
+            codex_thread_id=thread_id,
+            last_turn_id=turn_id,
+            updated_at=self.clock(),
+            revision=current.revision + 1,
+        )
+        self.store.save_task(updated, expected_revision=expected_revision)
+        self.audit.append(
+            "codex.thread.replaced",
+            actor=AuditActor.system,
+            task_id=task_id,
+            payload={
+                "previous_thread_id": previous_thread_id,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "reason": "rollout_missing",
+                "revision": updated.revision,
+            },
+        )
+        return updated
+
     def apply_validation(
         self,
         task_id: str,

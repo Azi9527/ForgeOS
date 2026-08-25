@@ -41,6 +41,7 @@ def _distributions(root: Path) -> Path:
             "forgeos/web/index.html",
             "forgeos/web/app.js",
             "forgeos/web/operator.js",
+            "forgeos/web/pilot.js",
             "forgeos/web/styles.css",
         ):
             archive.writestr(name, b"{}")
@@ -83,7 +84,7 @@ def test_distribution_gate_rejects_non_version_tag(tmp_path: Path) -> None:
     dist = _distributions(root)
 
     with pytest.raises(ValueError, match="release tag must be"):
-        inspect_distribution(root, dist, tag="forgeos-v0.2.0-rc.1")
+        inspect_distribution(root, dist, tag="forgeos-v0.2.1-rc.1")
 
 
 def test_checksum_writer_is_deterministic(tmp_path: Path) -> None:

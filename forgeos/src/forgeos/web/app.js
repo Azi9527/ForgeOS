@@ -1,5 +1,5 @@
 const token = document.querySelector('meta[name="forge-token"]').content;
-const state = { selectedTask: null, tasks: [], jobs: [], polling: null, pendingDecision: null };
+const state = { selectedTask: null, tasks: [], jobs: [], doctor: null, polling: null, pendingDecision: null };
 
 const element = (id) => document.getElementById(id);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({
@@ -27,12 +27,15 @@ function toast(message, error = false) {
 async function refresh() {
   try {
     const status = await api("/api/status");
+    if (!state.doctor) state.doctor = await api("/api/doctor");
     element("connection-dot").classList.add("online");
     element("workspace").textContent = status.workspace;
     if (!status.initialized) {
       element("project-name").textContent = "未初始化";
       element("init-panel").classList.remove("hidden");
+      element("pilot-panel").classList.add("hidden");
       element("workspace-panel").classList.add("hidden");
+      ForgePilot.renderBootstrap(state.doctor);
       return;
     }
     element("project-name").textContent = status.project.name;
@@ -46,6 +49,7 @@ async function refresh() {
     ]);
     state.tasks = tasks;
     state.jobs = jobs;
+    ForgePilot.renderWorkspace(status, state.doctor, tasks);
     renderTasks();
     renderJobs(jobs);
     renderAudit(events);
@@ -147,12 +151,14 @@ function renderDetail(detail) {
   const lastPolicy = (detail.policy_evaluations || []).at(-1);
   const lastBudget = (detail.budgets || []).at(-1);
   const progress = activeJob?.progress || null;
+  const guidance = ForgePilot.taskGuidance(task, activeJob, Boolean(lastReport));
   node.innerHTML = `
     <div class="task-heading">
       <div><span class="status ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span><h2>${escapeHtml(task.title)}</h2><p>${escapeHtml(task.id)} · revision ${task.revision}</p></div>
-      <div class="actions">${actionButtons(task, activeJob)}</div>
+      <div class="actions">${actionButtons(task, activeJob)}${lastReport ? '<button class="secondary" id="download-task-report">下载报告</button>' : ""}</div>
     </div>
     <div class="detail-grid">
+      <article class="detail-block wide next-step ${escapeHtml(guidance.tone)}"><h3>推荐下一步</h3><strong>${escapeHtml(guidance.title)}</strong><p>${escapeHtml(guidance.detail)}</p></article>
       <article class="detail-block wide"><h3>目标</h3><p>${escapeHtml(task.objective)}</p></article>
       <article class="detail-block"><h3>验收条件</h3><ul>${criteria}</ul></article>
       <article class="detail-block"><h3>运行关联</h3><p>Thread: <code>${escapeHtml(task.codex_thread_id || "未启动")}</code></p><p>Turn: <code>${escapeHtml(task.last_turn_id || "—")}</code></p></article>
@@ -175,6 +181,17 @@ function renderDetail(detail) {
   });
   const steerForm = element("steer-form");
   if (steerForm) steerForm.addEventListener("submit", (event) => submitSteer(event, task));
+  const reportButton = element("download-task-report");
+  if (reportButton) reportButton.addEventListener("click", () => downloadJson(
+    `/api/tasks/${encodeURIComponent(task.id)}/report/export`, `${task.id}-task-report.json`
+  ));
+}
+
+async function downloadJson(path, filename) {
+  try {
+    ForgePilot.saveJson(await api(path), filename);
+    toast(`已下载 ${filename}`);
+  } catch (error) { toast(error.message, true); }
 }
 
 async function performAction(button, task) {
@@ -351,11 +368,21 @@ element("init-form").addEventListener("submit", async (event) => {
       }]
     }) });
     toast("ForgeOS 项目已初始化");
+    state.doctor = null;
     await refresh();
   } catch (error) { toast(error.message, true); }
 });
 
 element("new-task-button").addEventListener("click", () => element("task-dialog").showModal());
+element("pilot-new-task").addEventListener("click", () => element("task-dialog").showModal());
+element("diagnostics-download").addEventListener("click", () => downloadJson(
+  "/api/diagnostics/export", "forgeos-diagnostics.json"
+));
+element("readiness-refresh").addEventListener("click", async () => {
+  state.doctor = null;
+  await refresh();
+  toast("运行条件已重新检查");
+});
 element("integrity-scan-button").addEventListener("click", async (event) => {
   const button = event.currentTarget;
   button.disabled = true;

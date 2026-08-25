@@ -47,6 +47,7 @@ writes use same-directory temporary files plus `fsync` and atomic replace.
 
 ```powershell
 forge --workspace D:\work\example ui
+forge --workspace D:\work\example ui --port 0 --open-browser
 ```
 
 ForgeOS prints a token-bearing loopback URL such as:
@@ -58,7 +59,14 @@ http://127.0.0.1:8765/?token=<random-session-token>
 Open that exact URL to initialize a project, create tasks, run or resume Codex,
 execute validation, review evidence, accept work, and inspect Audit/Execution
 records. Use `--port 0` for an automatically selected port and `--read-only`
-for inspection-only Codex turns.
+for inspection-only Codex turns. `--open-browser` opens the exact tokenized URL
+after the loopback server starts.
+
+The V1.1 operator panel summarizes `forge doctor` readiness, shows one
+recommended next action for the selected task state, and can download a bounded
+diagnostic bundle. Completed tasks with Forge Task Reports expose a JSON report
+download; runtime credentials and model response content are excluded from the
+diagnostic bundle.
 
 The Developer Preview binds only to `127.0.0.1`, requires a random API token,
 sets a restrictive Content Security Policy, caps request bodies, serializes

@@ -212,7 +212,7 @@ def test_release_readiness_persists_six_passing_gates(tmp_path: Path) -> None:
     report = release.check()
 
     assert report.passed is True
-    assert report.package_version == PACKAGE_VERSION == "0.2.0"
+    assert report.package_version == PACKAGE_VERSION == "0.2.1"
     assert len(report.checks) == 6
     assert release.latest()["id"] == report.id
     assert forge.audit.read_all()[-1].event_type == "release.readiness_checked"
