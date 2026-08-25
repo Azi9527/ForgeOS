@@ -295,18 +295,16 @@ class ForgeStore:
 
     def _safe_new_path(self, path: Path) -> Path:
         absolute = path if path.is_absolute() else self.project_root / path
-        candidate = absolute.resolve(strict=False)
-        if not candidate.is_relative_to(self.project_root):
-            raise ForgeConfigError(f"Forge path escapes project root: {path}")
-
-        current = self.project_root
+        candidate = type(absolute)(os.path.abspath(absolute))
         try:
-            relative = absolute.relative_to(self.project_root)
+            relative = candidate.relative_to(self.project_root)
         except ValueError as exc:
             raise ForgeConfigError(f"Forge path escapes project root: {path}") from exc
+
+        current = self.project_root
         for part in relative.parts:
             current /= part
-            if current.exists() and current.is_symlink():
+            if current.is_symlink():
                 raise ForgeConfigError(f"Forge path contains a symbolic link: {current}")
         return candidate
 

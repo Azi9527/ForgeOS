@@ -87,6 +87,22 @@ def test_task_id_allocation_is_concurrent_safe(tmp_path: Path) -> None:
     assert set(identifiers) == {f"FORGE-{index:04d}" for index in range(1, 21)}
 
 
+def test_task_id_lock_does_not_resolve_volatile_leaf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = initialized_service(tmp_path).store
+    original_resolve = Path.resolve
+
+    def unstable_resolve(path: Path, strict: bool = False) -> Path:
+        if path.name == ".sequence.lock":
+            return tmp_path.parent / "unexpected-root" / path.name
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", unstable_resolve)
+
+    assert store.allocate_task_id("FORGE") == "FORGE-0001"
+
+
 def test_windows_existing_lock_permission_error_is_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -202,6 +218,9 @@ def test_store_rejects_path_traversal(tmp_path: Path) -> None:
 
     with pytest.raises(ForgeConfigError, match="unsafe Forge relative path"):
         actual.store.write_record("../outside.json", {"bad": True})
+
+    with pytest.raises(ForgeConfigError, match="escapes project root"):
+        actual.store.write_json(tmp_path / ".." / "outside.json", {"bad": True})
 
 
 def test_reopening_legacy_layout_adds_only_missing_protocol_directories(tmp_path: Path) -> None:
