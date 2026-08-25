@@ -139,7 +139,11 @@ class ForgeControlService:
         executions = sorted(
             self.forge.store.list_records(f"executions/{task_id}"),
             key=lambda record: (
-                record["started_at"] if isinstance(record.get("started_at"), int) else -1,
+                record["started_at"]
+                if isinstance(record.get("started_at"), int)
+                else record["completed_at"]
+                if isinstance(record.get("completed_at"), int)
+                else -1,
                 str(record.get("turn_id", "")),
             ),
         )
@@ -341,10 +345,21 @@ class ForgeControlService:
         return self._require_operations().recover()
 
     def task_report(self, task_id: str) -> dict[str, Any]:
+        task = self.forge.task(task_id)
         reports = TaskReportService(self.forge.store, clock=self.clock).for_task(task_id)
         if not reports:
             raise ForgeNotFoundError(f"task has no Forge Task Report: {task_id}")
-        return reports[-1].to_dict()
+        if task.task_report_id is not None:
+            linked = next(
+                (report for report in reports if report.report_id == task.task_report_id),
+                None,
+            )
+            if linked is None:
+                raise ForgeNotFoundError(
+                    f"task report is missing for {task_id}: {task.task_report_id}"
+                )
+            return linked.to_dict()
+        return max(reports, key=lambda report: (report.generated_at, report.report_id)).to_dict()
 
     def doctor(self) -> dict[str, Any]:
         return ForgeDoctor(self.forge.store.project_root).run().to_dict()
@@ -352,10 +367,22 @@ class ForgeControlService:
     def diagnostic_bundle(self) -> dict[str, Any]:
         """Return bounded operator diagnostics without credentials or model content."""
 
+        status = self.status()
+        if status["initialized"]:
+            config = self.forge.config()
+            status["validation_checks"] = [
+                {
+                    "name": check.name,
+                    "level": check.level.value,
+                    "timeout_seconds": check.timeout_seconds,
+                    "required": check.required,
+                }
+                for check in config.validation_checks
+            ]
         return {
             "schema_version": 1,
             "generated_at": self.clock(),
-            "status": self.status(),
+            "status": status,
             "doctor": self.doctor(),
             "recent_jobs": [
                 {

@@ -36,7 +36,7 @@ launch → readiness → create/select Task → recommended next action
 
 | Gate | Result |
 | --- | --- |
-| Python suite | PASS — 124 tests after recovery, history guard and evidence-ordering coverage |
+| Python suite | PASS — 125 tests after recovery, history guard and evidence-ordering coverage |
 | Ruff | PASS |
 | Ruff format check | PASS — 64 files formatted |
 | JavaScript syntax | PASS — `operator.js`, `pilot.js`, `app.js` |

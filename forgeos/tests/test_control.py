@@ -354,7 +354,28 @@ def test_control_diagnostics_are_bounded_and_exclude_runtime_credentials(tmp_pat
         clock=lambda: NOW,
     )
     try:
-        control.initialize({"name": "Diagnostics", "validation_checks": []})
+        control.initialize(
+            {
+                "name": "Diagnostics",
+                "validation_checks": [
+                    {
+                        "name": "remote-check",
+                        "argv": [sys.executable, "-c", "pass", "Authorization: sentinel-secret"],
+                    }
+                ],
+            }
+        )
+        for index in range(21):
+
+            def sensitive_operation(job_id: str, sequence: int = index) -> dict[str, Any]:
+                control.jobs.update_progress(
+                    job_id,
+                    {"model_content": f"sentinel-progress-{sequence}"},
+                )
+                return {"model_content": f"sentinel-result-{sequence}"}
+
+            job = control.jobs.submit("diagnostic-test", f"TASK-{index:02d}", sensitive_operation)
+            control.jobs.wait(job.id)
         actual = control.diagnostic_bundle()
     finally:
         control.close()
@@ -363,8 +384,32 @@ def test_control_diagnostics_are_bounded_and_exclude_runtime_credentials(tmp_pat
     assert actual["generated_at"] == NOW
     assert actual["status"]["project"]["name"] == "Diagnostics"
     assert actual["doctor"]["workspace"] == str(tmp_path.resolve())
-    assert actual["recent_jobs"] == []
-    assert "token" not in str(actual).lower()
+    assert len(actual["recent_jobs"]) == 20
+    assert all(
+        set(job)
+        == {
+            "id",
+            "kind",
+            "task_id",
+            "state",
+            "created_at",
+            "started_at",
+            "completed_at",
+        }
+        for job in actual["recent_jobs"]
+    )
+    assert actual["status"]["validation_checks"] == [
+        {
+            "name": "remote-check",
+            "level": "L2_UNIT",
+            "timeout_seconds": 60,
+            "required": True,
+        }
+    ]
+    assert "sentinel-secret" not in str(actual)
+    assert "sentinel-progress" not in str(actual)
+    assert "sentinel-result" not in str(actual)
+    assert "argv" not in str(actual)
 
 
 def test_task_detail_orders_chronological_evidence(tmp_path: Path) -> None:
@@ -378,6 +423,15 @@ def test_task_detail_orders_chronological_evidence(tmp_path: Path) -> None:
         control.forge.store.write_record(
             f"executions/{task['id']}/a-newer.json",
             {"turn_id": "turn-newer", "started_at": 20, "final_response": "newer"},
+        )
+        control.forge.store.write_record(
+            f"executions/{task['id']}/m-newest-without-start.json",
+            {
+                "turn_id": "turn-newest",
+                "started_at": None,
+                "completed_at": 30,
+                "final_response": "newest without start",
+            },
         )
         control.forge.store.write_record(
             "validation/results/z-older.json",
@@ -397,13 +451,87 @@ def test_task_detail_orders_chronological_evidence(tmp_path: Path) -> None:
                 "passed": True,
             },
         )
+        regression_record = {
+            "schema_version": 1,
+            "task_id": task["id"],
+            "baseline_report_id": "validation-baseline",
+            "current_report_id": "validation-current",
+            "passed": True,
+            "checks": [],
+        }
+        control.forge.store.write_record(
+            "validation/regression/z-older.json",
+            {
+                **regression_record,
+                "report_id": "regression-older",
+                "completed_at": "2026-08-24T00:00:01Z",
+            },
+        )
+        control.forge.store.write_record(
+            "validation/regression/a-newer.json",
+            {
+                **regression_record,
+                "report_id": "regression-newer",
+                "completed_at": "2026-08-24T00:00:02Z",
+            },
+        )
+        task_report = {
+            "schema_version": 1,
+            "task_id": task["id"],
+            "objective": "ordered report",
+            "status": "DONE",
+            "changed_files": [],
+            "commands": [],
+            "build_result": [],
+            "test_result": [],
+            "regression_result": {},
+            "review": {},
+            "acceptance": {},
+            "repair_attempts": 0,
+            "risks": [],
+            "technical_debt": [],
+            "final_diff": {},
+            "start_commit": None,
+            "end_commit": None,
+            "validation_report_id": "validation-current",
+            "regression_report_id": "regression-newer",
+        }
+        control.forge.store.write_record(
+            f"reports/{task['id']}/z-older.json",
+            {
+                **task_report,
+                "report_id": "task-report-older",
+                "generated_at": "2026-08-24T00:00:01Z",
+            },
+        )
+        control.forge.store.write_record(
+            f"reports/{task['id']}/a-newer.json",
+            {
+                **task_report,
+                "report_id": "task-report-newer",
+                "generated_at": "2026-08-24T00:00:02Z",
+            },
+        )
 
         detail = control.task_detail(task["id"])
 
-        assert [item["final_response"] for item in detail["executions"]] == ["older", "newer"]
+        assert [item["final_response"] for item in detail["executions"]] == [
+            "older",
+            "newer",
+            "newest without start",
+        ]
         assert [item["report_id"] for item in detail["validations"]] == [
             "validation-older",
             "validation-newer",
         ]
+        assert [item["report_id"] for item in detail["regressions"]] == [
+            "regression-older",
+            "regression-newer",
+        ]
+        assert [item["report_id"] for item in detail["reports"]] == [
+            "task-report-older",
+            "task-report-newer",
+        ]
+        assert control.task_report(task["id"])["report_id"] == "task-report-newer"
     finally:
         control.close()

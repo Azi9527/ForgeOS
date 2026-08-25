@@ -280,15 +280,18 @@ def test_missing_rollout_starts_replacement_thread_with_fresh_context(tmp_path: 
         "JSON-RPC error -32600: no rollout found for thread id thread-missing"
     )
     gateway = CodexSdkGateway(settings(tmp_path), client_factory=lambda _settings: client)
+    controls: list[Any] = []
 
     result = gateway.run_turn_controlled(
         "Recover safely",
         thread_id="thread-missing",
         developer_instructions="Bounded replacement context",
         allow_missing_rollout_replacement=True,
+        on_started=controls.append,
     )
 
     assert result.thread_id == "thread-controlled"
+    assert controls[0].replaced_thread_id == "thread-missing"
     assert client.resumed == [("thread-missing", {"cwd": str(tmp_path.resolve())})]
     assert client.started == [
         {

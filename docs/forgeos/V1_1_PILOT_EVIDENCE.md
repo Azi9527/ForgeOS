@@ -43,9 +43,10 @@ listeners were closed after each test session.
 Other resume failures are not masked. Replacement is permitted only when the missing Thread has no
 persisted Execution Record; any Thread with history remains fail-closed so ForgeOS cannot silently
 lose prior model context. Unit and execution integration tests cover both paths. The pilot
-Validation contained 123 tests; the reviewed release candidate contains 124 after adding the
-history guard test. It also covers chronological ordering of Execution, Validation, Regression and
-Task Report evidence so the Operator UI presents the latest result.
+Validation contained 123 tests; the reviewed release candidate contains 125 after adding the
+history guard and permitted pre-rollout recovery tests. It also covers chronological ordering of
+Execution, Validation, Regression and Task Report evidence so the Operator UI presents the latest
+result.
 
 ## Lifecycle result
 
