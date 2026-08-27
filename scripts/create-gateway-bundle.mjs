@@ -3,8 +3,9 @@ import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
-const projectRoot = path.resolve(new URL("..", import.meta.url).pathname);
+const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const target = String(process.argv[2] ?? "").trim();
 if (!/^[a-zA-Z0-9._-]+$/u.test(target)) {
   throw new Error("Usage: node scripts/create-gateway-bundle.mjs <rust-target>");

@@ -6,6 +6,7 @@
 build
 node_modules
 backend/target
+artifacts/
 dist
 .env
 .env.*
