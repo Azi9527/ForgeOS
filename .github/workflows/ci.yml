@@ -33,8 +33,36 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run fast security regression suite
-        run: pnpm verify:security-regressions
+      - name: Check gateway formatting
+        working-directory: backend
+        run: cargo fmt --check
+
+      - name: Test viewer route authorization
+        working-directory: backend
+        run: cargo test main_tests::auth_git_static::viewer_http_routes_match_websocket_authorization_policy
+
+      - name: Test gateway health endpoints
+        working-directory: backend
+        run: cargo test main_tests::auth_git_static::health_readiness_and_metrics_endpoints_report_gateway_state
+
+      - name: Test notification webhook pinning
+        working-directory: backend
+        run: cargo test main_tests::settings_and_automation::notification_webhook_resolution_skips_dns_pinning_for_literal_public_ip
+
+      - name: Test forced shutdown confirmation
+        working-directory: backend
+        run: cargo test main_tests::settings_and_automation::forced_shutdown_requires_explicit_confirmation_phrase
+
+      - name: Test state snapshot recovery
+        working-directory: backend
+        run: cargo test main_tests::settings_and_automation::corrupt_ui_state_recovers_from_previous_snapshot
+
+      - name: Test attachment retention
+        working-directory: backend
+        run: cargo test main_tests::attachments_and_recovery::attachment_cleanup_retains_recent_orphans_until_min_age
+
+      - name: Test tunnel safety
+        run: pnpm verify:tunnel-safety
 
   windows-e2e:
     name: Windows E2E
