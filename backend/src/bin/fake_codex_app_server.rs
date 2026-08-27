@@ -45,6 +45,11 @@ fn main() {
     let mut turn_counter = 0_u64;
     let mut threads = BTreeMap::<String, Value>::new();
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--version") {
+        println!("codex-cli 0.1.0");
+        return;
+    }
+
     let mut goals_enabled = args
         .windows(2)
         .any(|window| window[0] == "--enable" && window[1] == "goals");
