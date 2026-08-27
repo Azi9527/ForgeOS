@@ -12,6 +12,10 @@ jobs:
     name: Security regressions
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      RUST_MIN_STACK: "16777216"
 
     steps:
       - name: Checkout
