@@ -1,0 +1,936 @@
+use super::*;
+use sha2::Digest;
+
+pub(crate) fn session_relay_key(profile_id: &str, session_id: &str) -> String {
+    format!("profile::{profile_id}::session::{session_id}")
+}
+
+pub(crate) fn global_relay_key(profile_id: &str) -> String {
+    format!("profile::{profile_id}::{GLOBAL_RELAY_KEY}")
+}
+
+pub(crate) fn request_params_hash(params: &Value) -> String {
+    let bytes = serde_json::to_vec(params).unwrap_or_else(|_| params.to_string().into_bytes());
+    URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(bytes))
+}
+
+pub(crate) fn user_role_label(role: UserRole) -> &'static str {
+    match role {
+        UserRole::Owner => "owner",
+        UserRole::Admin => "admin",
+        UserRole::Viewer => "viewer",
+    }
+}
+
+pub(crate) fn role_has_admin_access(role: UserRole) -> bool {
+    matches!(role, UserRole::Owner | UserRole::Admin)
+}
+
+pub(crate) fn owner_role_configured(config: &Config) -> bool {
+    config
+        .owner_password
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        || config
+            .owner_password_hash
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+}
+
+pub(crate) fn web_auth_configured(config: &Config) -> bool {
+    [
+        config.password.as_deref(),
+        config.password_hash.as_deref(),
+        config.owner_password.as_deref(),
+        config.owner_password_hash.as_deref(),
+        config.viewer_password.as_deref(),
+        config.viewer_password_hash.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .any(|value| !value.is_empty())
+}
+
+pub(crate) fn public_host_is_loopback(config: &Config) -> bool {
+    let host = config.public_host.trim().trim_matches(['[', ']']);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+pub(crate) fn authless_admin_allowed(config: &Config) -> bool {
+    !web_auth_configured(config) && public_host_is_loopback(config)
+}
+
+pub(crate) fn role_has_owner_access(config: &Config, role: UserRole) -> bool {
+    let owner_required = owner_role_configured(config)
+        || config.require_owner_role
+        || !public_host_is_loopback(config)
+        || config.system_shutdown_enabled;
+    !owner_required || matches!(role, UserRole::Owner)
+}
+
+pub(crate) fn owner_required_error_value() -> String {
+    json!({
+        "code": "OWNER_REQUIRED",
+        "message": "This action requires the owner role."
+    })
+    .to_string()
+}
+
+pub(crate) fn request_cache_key(profile_id: &str, request_id: &str, role: UserRole) -> String {
+    format!(
+        "profile::{profile_id}::role::{}::request::{request_id}",
+        user_role_label(role)
+    )
+}
+
+pub(crate) fn runtime_session_key(profile_id: &str, session_id: &str) -> String {
+    format!("profile::{profile_id}::session-runtime::{session_id}")
+}
+
+pub(crate) async fn session_operation_lock(
+    state: &AppState,
+    profile_id: &str,
+    session_id: &str,
+) -> Arc<Mutex<()>> {
+    let key = runtime_session_key(profile_id, session_id);
+    let mut locks = state.session_operation_locks.lock().await;
+    if locks.len() >= 512 && !locks.contains_key(&key) {
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+    Arc::clone(locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+}
+
+pub(crate) fn api_error(status: StatusCode, message: impl Into<String>) -> ApiError {
+    ApiError {
+        status,
+        message: message.into(),
+    }
+}
+
+pub(crate) fn bounded_pagination_cursor(
+    seen: &mut HashSet<String>,
+    raw_cursor: Option<&str>,
+    page_count: usize,
+    max_pages: usize,
+) -> std::result::Result<Option<String>, &'static str> {
+    let next_cursor = raw_cursor
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let Some(next_cursor) = next_cursor else {
+        return Ok(None);
+    };
+    if page_count >= max_pages {
+        return Err("pagination page limit reached");
+    }
+    if !seen.insert(next_cursor.clone()) {
+        return Err("pagination cursor cycle detected");
+    }
+    Ok(Some(next_cursor))
+}
+
+pub(crate) const SMALL_JSON_BODY_LIMIT: usize = 256 * 1024;
+pub(crate) const LARGE_JSON_BODY_LIMIT: usize = 1024 * 1024;
+
+pub(crate) async fn read_limited_body(
+    request: Request,
+    limit: usize,
+    label: &str,
+) -> ApiResult<Bytes> {
+    if request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > limit)
+    {
+        return Err(api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("{label} exceeds the {limit} byte limit."),
+        ));
+    }
+
+    to_bytes(request.into_body(), limit).await.map_err(|error| {
+        let message = error.to_string();
+        if message.to_ascii_lowercase().contains("length limit") {
+            api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("{label} exceeds the {limit} byte limit."),
+            )
+        } else {
+            api_error(StatusCode::BAD_REQUEST, format!("Failed to read {label}."))
+        }
+    })
+}
+
+pub(crate) async fn read_json_body(
+    request: Request,
+    limit: usize,
+    label: &str,
+) -> ApiResult<Value> {
+    let body = read_limited_body(request, limit, label).await?;
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(json!({}));
+    }
+    serde_json::from_slice(&body).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            format!("{label} must be valid JSON."),
+        )
+    })
+}
+
+pub(crate) const USAGE_LIMIT_EXCEEDED_CODE: &str = "USAGE_LIMIT_EXCEEDED";
+
+pub(crate) fn structured_error_value(message: &str) -> Option<Value> {
+    let trimmed = message.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .filter(Value::is_object)
+}
+
+pub(crate) fn structured_error_message(message: &str) -> Option<String> {
+    let value = structured_error_value(message)?;
+    let mut stack = vec![value];
+    while let Some(current) = stack.pop() {
+        match current {
+            Value::Object(object) => {
+                if let Some(message) = object.get("message").and_then(value_text) {
+                    return Some(message);
+                }
+
+                for value in object.into_values() {
+                    if matches!(value, Value::Object(_) | Value::Array(_)) {
+                        stack.push(value);
+                    }
+                }
+            }
+            Value::Array(entries) => {
+                stack.extend(entries);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+pub(crate) fn usage_limit_error_message(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    if lowered.contains("usagelimitexceeded")
+        || (lowered.contains("usage limit")
+            && (lowered.contains("hit")
+                || lowered.contains("exceeded")
+                || lowered.contains("reached")))
+    {
+        return true;
+    }
+
+    let Some(value) = structured_error_value(message) else {
+        return false;
+    };
+    let mut stack = vec![value];
+    while let Some(current) = stack.pop() {
+        match current {
+            Value::String(text) => {
+                let lowered = text.to_ascii_lowercase();
+                let compact = lowered
+                    .chars()
+                    .filter(|ch| ch.is_ascii_alphanumeric())
+                    .collect::<String>();
+                if compact == "usagelimitexceeded"
+                    || (lowered.contains("usage limit")
+                        && (lowered.contains("hit")
+                            || lowered.contains("exceeded")
+                            || lowered.contains("reached")))
+                {
+                    return true;
+                }
+            }
+            Value::Object(object) => stack.extend(object.into_values()),
+            Value::Array(entries) => stack.extend(entries),
+            _ => {}
+        }
+    }
+    false
+}
+
+pub(crate) fn retry_at_ms_from_value(value: &Value) -> Option<u64> {
+    let now = now_unix_ms();
+    let mut stack = vec![value.clone()];
+    let mut candidates = Vec::new();
+
+    while let Some(current) = stack.pop() {
+        match current {
+            Value::Object(object) => {
+                for (key, value) in object {
+                    let normalized_key = key
+                        .chars()
+                        .filter(|ch| ch.is_ascii_alphanumeric())
+                        .map(|ch| ch.to_ascii_lowercase())
+                        .collect::<String>();
+                    let absolute_retry_key =
+                        matches!(normalized_key.as_str(), "retryat" | "resetat" | "resetsat");
+                    let relative_retry_key = matches!(
+                        normalized_key.as_str(),
+                        "retryafterseconds" | "resetafterseconds"
+                    );
+
+                    if absolute_retry_key || relative_retry_key {
+                        let numeric = match &value {
+                            Value::Number(number) => number.as_f64(),
+                            Value::String(text) => text.trim().parse::<f64>().ok(),
+                            _ => None,
+                        };
+                        if let Some(numeric) =
+                            numeric.filter(|value| value.is_finite() && *value > 0.0)
+                        {
+                            let candidate = if relative_retry_key {
+                                now.saturating_add((numeric * 1000.0).round() as u64)
+                            } else if numeric >= 100_000_000_000.0 {
+                                numeric.round() as u64
+                            } else {
+                                (numeric * 1000.0).round() as u64
+                            };
+                            candidates.push(candidate);
+                        }
+                    }
+
+                    match value {
+                        Value::String(text) if text.trim_start().starts_with('{') => {
+                            if let Ok(parsed) = serde_json::from_str::<Value>(text.trim()) {
+                                stack.push(parsed);
+                            }
+                        }
+                        Value::Object(_) | Value::Array(_) => stack.push(value),
+                        _ => {}
+                    }
+                }
+            }
+            Value::Array(entries) => stack.extend(entries),
+            _ => {}
+        }
+    }
+
+    candidates
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate >= now)
+        .min()
+        .or_else(|| candidates.into_iter().max())
+}
+
+pub(crate) fn usage_limit_error_payload(message: &str, retry_at_ms: Option<u64>) -> String {
+    let display_message = structured_error_message(message)
+        .unwrap_or_else(|| message.trim().to_string())
+        .trim()
+        .to_string();
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "code".to_string(),
+        Value::String(USAGE_LIMIT_EXCEEDED_CODE.to_string()),
+    );
+    payload.insert(
+        "status".to_string(),
+        json!(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+    );
+    payload.insert(
+        "message".to_string(),
+        Value::String(if display_message.is_empty() {
+            "You've hit your usage limit.".to_string()
+        } else {
+            display_message
+        }),
+    );
+
+    if let Some(retry_at_ms) = retry_at_ms {
+        payload.insert("retryAt".to_string(), json!(retry_at_ms));
+        let now = now_unix_ms();
+        if retry_at_ms > now {
+            payload.insert(
+                "retryAfterSeconds".to_string(),
+                json!((retry_at_ms - now).div_ceil(1000)),
+            );
+        }
+    }
+    if let Some(source) = structured_error_value(message) {
+        payload.insert("appServerError".to_string(), source);
+    }
+
+    Value::Object(payload).to_string()
+}
+
+pub(crate) fn trim_terminal_buffer(buffer: &mut String) {
+    if buffer.len() <= TERMINAL_BUFFER_LIMIT {
+        return;
+    }
+
+    let target = buffer.len().saturating_sub(TERMINAL_BUFFER_LIMIT);
+    let trim_index = buffer
+        .char_indices()
+        .find(|(index, _)| *index >= target)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    buffer.replace_range(..trim_index, "");
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn parse_terminal_process_identity(
+    pid: u32,
+    proc_stat: &str,
+) -> Option<TerminalProcessIdentity> {
+    let fields = proc_stat
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let process_group_id = fields.get(2)?.parse::<u32>().ok()?;
+    let start_time_ticks = fields.get(19)?.parse::<u64>().ok()?;
+    Some(TerminalProcessIdentity {
+        pid,
+        process_group_id,
+        start_time_ticks,
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn read_terminal_process_identity(pid: u32) -> Option<TerminalProcessIdentity> {
+    let proc_stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_terminal_process_identity(pid, &proc_stat)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn read_terminal_process_identity(_pid: u32) -> Option<TerminalProcessIdentity> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn terminal_process_identity_matches(
+    pid: u32,
+    expected: TerminalProcessIdentity,
+) -> bool {
+    read_terminal_process_identity(pid).is_some_and(|current| current == expected)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn terminal_process_identity_matches(
+    _pid: u32,
+    _expected: TerminalProcessIdentity,
+) -> bool {
+    true
+}
+
+pub(crate) async fn terminate_terminal_process(
+    pid: u32,
+    identity: Option<TerminalProcessIdentity>,
+) -> Result<()> {
+    if cfg!(target_os = "linux") && identity.is_none() {
+        warn!("refusing to terminate terminal pid {pid}: process identity unavailable");
+        return Ok(());
+    }
+    terminate_process_guarded(pid, identity).await
+}
+
+#[cfg(test)]
+pub(crate) async fn terminate_process(pid: u32) -> Result<()> {
+    terminate_process_guarded(pid, None).await
+}
+
+async fn terminate_process_guarded(
+    pid: u32,
+    identity: Option<TerminalProcessIdentity>,
+) -> Result<()> {
+    if cfg!(windows) {
+        let output = run_command_with_timeout(
+            "taskkill",
+            vec![
+                "/PID".to_string(),
+                pid.to_string(),
+                "/T".to_string(),
+                "/F".to_string(),
+            ],
+            Duration::from_secs(4),
+        )
+        .await?;
+        if !output.status.success() {
+            anyhow::bail!("failed to stop terminal process.");
+        }
+        return Ok(());
+    }
+
+    if let Some(expected) = identity {
+        if !terminal_process_identity_matches(pid, expected) {
+            warn!("refusing to terminate terminal pid {pid}: process identity changed");
+            return Ok(());
+        }
+    }
+
+    let can_signal_group = identity
+        .map(|expected| expected.process_group_id == pid)
+        .unwrap_or(true);
+
+    if can_signal_group {
+        let _ = run_command_with_timeout(
+            "kill",
+            vec!["-TERM".to_string(), "--".to_string(), format!("-{pid}")],
+            Duration::from_secs(4),
+        )
+        .await?;
+    }
+    let _ = run_command_with_timeout(
+        "kill",
+        vec!["-TERM".to_string(), pid.to_string()],
+        Duration::from_secs(4),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    if let Some(expected) = identity {
+        if !terminal_process_identity_matches(pid, expected) {
+            return Ok(());
+        }
+    }
+    if !can_signal_group {
+        let probe = run_command_with_timeout(
+            "kill",
+            vec!["-0".to_string(), pid.to_string()],
+            Duration::from_secs(2),
+        )
+        .await?;
+        if !probe.status.success() {
+            return Ok(());
+        }
+        let output = run_command_with_timeout(
+            "kill",
+            vec!["-KILL".to_string(), pid.to_string()],
+            Duration::from_secs(4),
+        )
+        .await?;
+        if !output.status.success() {
+            anyhow::bail!("failed to stop terminal process.");
+        }
+        return Ok(());
+    }
+
+    let group_probe = run_command_with_timeout(
+        "kill",
+        vec!["-0".to_string(), "--".to_string(), format!("-{pid}")],
+        Duration::from_secs(2),
+    )
+    .await?;
+    if !group_probe.status.success() {
+        return Ok(());
+    }
+
+    let _ = run_command_with_timeout(
+        "kill",
+        vec!["-KILL".to_string(), "--".to_string(), format!("-{pid}")],
+        Duration::from_secs(4),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    if let Some(expected) = identity {
+        if !terminal_process_identity_matches(pid, expected) {
+            return Ok(());
+        }
+    }
+    let group_probe = run_command_with_timeout(
+        "kill",
+        vec!["-0".to_string(), "--".to_string(), format!("-{pid}")],
+        Duration::from_secs(2),
+    )
+    .await?;
+    if !group_probe.status.success() {
+        return Ok(());
+    }
+
+    let output = run_command_with_timeout(
+        "kill",
+        vec!["-KILL".to_string(), pid.to_string()],
+        Duration::from_secs(4),
+    )
+    .await?;
+    if !output.status.success() {
+        anyhow::bail!("failed to stop terminal process.");
+    }
+    Ok(())
+}
+
+pub(crate) fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub(crate) fn now_rfc3339() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| String::new())
+}
+
+pub(crate) async fn upload_attachments(
+    state: &AppState,
+    profile_id: &str,
+    session_id: &str,
+    files: Vec<UploadFilePayload>,
+) -> ApiResult<Value> {
+    if files.len() > MAX_ATTACHMENTS_PER_REQUEST {
+        return Err(attachment_count_limit_error());
+    }
+
+    let mut uploads = Vec::new();
+    let mut total_decoded_size = 0_u64;
+    for file in files {
+        let max_encoded_len = (((state.config.max_upload_bytes as usize).saturating_add(2)) / 3)
+            .saturating_mul(4)
+            .saturating_add(4);
+        if file.data_base64.len() > max_encoded_len {
+            return Err(api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                attachment_limit_error_message(state.config.max_upload_bytes),
+            ));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(file.data_base64)
+            .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+        validate_attachment_size(&state.config, bytes.len() as u64)?;
+        total_decoded_size = total_decoded_size.saturating_add(bytes.len() as u64);
+        validate_total_attachment_size(&state.config, total_decoded_size)?;
+        uploads.push(AttachmentUploadPayload {
+            name: file.name,
+            mime_type: file.mime_type,
+            bytes,
+        });
+    }
+    let stored = save_uploaded_attachment_records(state, profile_id, session_id, uploads).await?;
+    emit_attachments_updated(state, profile_id, session_id).await?;
+    Ok(json!({
+        "attachments": stored
+            .iter()
+            .map(attachment_payload_from_record)
+            .collect::<Vec<_>>()
+    }))
+}
+
+pub(crate) fn json_error(status: StatusCode, message: &str) -> Response {
+    let mut response =
+        Json(json!({ "message": redact_user_facing_error(message) })).into_response();
+    *response.status_mut() = status;
+    response
+}
+
+pub(crate) fn apply_security_headers(headers: &mut HeaderMap) {
+    headers.entry(header::HeaderName::from_static("content-security-policy")).or_insert(
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' https://hcaptcha.com https://*.hcaptcha.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://hcaptcha.com https://*.hcaptcha.com; worker-src 'self' blob:; frame-src https://hcaptcha.com https://*.hcaptcha.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        ),
+    );
+    headers
+        .entry(header::HeaderName::from_static("x-content-type-options"))
+        .or_insert(HeaderValue::from_static("nosniff"));
+    headers
+        .entry(header::HeaderName::from_static("referrer-policy"))
+        .or_insert(HeaderValue::from_static("same-origin"));
+    headers
+        .entry(header::HeaderName::from_static("x-frame-options"))
+        .or_insert(HeaderValue::from_static("DENY"));
+}
+
+pub(crate) fn redact_user_facing_error(message: &str) -> String {
+    let mut redacted = message.to_string();
+    if let Ok(home) = env::var("HOME") {
+        let home = home.trim();
+        if !home.is_empty() && home != "/" {
+            redacted = redacted.replace(home, "~");
+        }
+    }
+    for path_prefix in ["/home/", "/Users/"] {
+        loop {
+            let Some(index) = redacted.find(path_prefix) else {
+                break;
+            };
+            let value_end = redacted[index..]
+                .char_indices()
+                .find(|(_, ch)| ch.is_whitespace() || matches!(ch, '"' | '\'' | ',' | ';' | '}'))
+                .map(|(offset, _)| index + offset)
+                .unwrap_or(redacted.len());
+            if value_end <= index {
+                break;
+            }
+            redacted.replace_range(index..value_end, "~");
+        }
+    }
+
+    let mut bearer_search_start = 0;
+    loop {
+        let lowered = redacted.to_ascii_lowercase();
+        let Some(relative_index) = lowered[bearer_search_start..].find("bearer ") else {
+            break;
+        };
+        let index = bearer_search_start + relative_index;
+        let value_start = index + "bearer ".len();
+        let value_end = redacted[value_start..]
+            .char_indices()
+            .find(|(_, ch)| ch.is_whitespace() || matches!(ch, '"' | '\'' | ',' | ';' | '}'))
+            .map(|(offset, _)| value_start + offset)
+            .unwrap_or(redacted.len());
+        if redacted[value_start..].starts_with("[redacted]") {
+            bearer_search_start = value_start.saturating_add("[redacted]".len());
+            continue;
+        }
+        if value_end > value_start {
+            redacted.replace_range(value_start..value_end, "[redacted]");
+            bearer_search_start = value_start.saturating_add("[redacted]".len());
+        } else {
+            break;
+        }
+    }
+
+    for token_prefix in ["sk-"] {
+        loop {
+            let lowered = redacted.to_ascii_lowercase();
+            let Some(index) = lowered.find(token_prefix) else {
+                break;
+            };
+            let value_end = redacted[index..]
+                .char_indices()
+                .find(|(_, ch)| ch.is_whitespace() || matches!(ch, '"' | '\'' | ',' | ';' | '}'))
+                .map(|(offset, _)| index + offset)
+                .unwrap_or(redacted.len());
+            if redacted[index..].starts_with("[redacted]") {
+                break;
+            }
+            if value_end <= index {
+                break;
+            }
+            redacted.replace_range(index..value_end, "[redacted]");
+        }
+    }
+
+    for key in [
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "authorization",
+        "password",
+        "session_secret",
+        "sessionSecret",
+        "hcaptchaSecretKey",
+        "webhookUrl",
+        "slackWebhookUrl",
+    ] {
+        for separator in ["=", ":", "\":", "':"] {
+            let mut search_start = 0;
+            loop {
+                let lowered = redacted.to_ascii_lowercase();
+                let needle = format!("{}{}", key.to_ascii_lowercase(), separator);
+                let Some(relative_index) = lowered[search_start..].find(&needle) else {
+                    break;
+                };
+                let index = search_start + relative_index;
+                let mut value_start = index + needle.len();
+                while let Some(ch) = redacted[value_start..].chars().next() {
+                    if ch.is_whitespace() || matches!(ch, '"' | '\'') {
+                        value_start += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                let value_end = redacted[value_start..]
+                    .char_indices()
+                    .find(|(_, ch)| {
+                        ch.is_whitespace() || matches!(ch, '"' | '\'' | ',' | ';' | '}')
+                    })
+                    .map(|(offset, _)| value_start + offset)
+                    .unwrap_or(redacted.len());
+                if redacted[value_start..].starts_with("[redacted]") {
+                    search_start = value_start.saturating_add("[redacted]".len());
+                    continue;
+                }
+                if value_end <= value_start {
+                    break;
+                }
+                redacted.replace_range(value_start..value_end, "[redacted]");
+                search_start = value_start.saturating_add("[redacted]".len());
+            }
+        }
+    }
+
+    if redacted.len() > 4000 {
+        redacted.truncate(4000);
+        redacted.push_str("...[truncated]");
+    }
+    redacted
+}
+
+pub(crate) fn normalize_request_path(base_path: &str, path: &str) -> NormalizedPath {
+    if base_path.is_empty() {
+        return NormalizedPath::Route(path.to_string());
+    }
+
+    if path == "/" {
+        return NormalizedPath::Redirect(format!("{base_path}/"));
+    }
+
+    if path == base_path {
+        return NormalizedPath::Redirect(format!("{base_path}/"));
+    }
+
+    if let Some(stripped) = path.strip_prefix(base_path) {
+        if stripped.is_empty() {
+            return NormalizedPath::Route("/".to_string());
+        }
+        if stripped.starts_with('/') {
+            return NormalizedPath::Route(stripped.to_string());
+        }
+    }
+
+    NormalizedPath::OutsideBase
+}
+
+pub(crate) fn with_base(base_path: &str, route_path: &str) -> String {
+    if base_path.is_empty() {
+        return route_path.to_string();
+    }
+    if route_path == "/" {
+        return format!("{base_path}/");
+    }
+    format!("{base_path}{route_path}")
+}
+
+pub(crate) fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+pub(crate) fn payload_cache_version(payload: &Value) -> String {
+    let encoded = serde_json::to_vec(payload).unwrap_or_else(|_| payload.to_string().into_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(encoded);
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+pub(crate) fn fnv1a32_hex(bytes: &[u8]) -> String {
+    let mut hash = 0x811c9dc5_u32;
+    for byte in bytes {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    format!("{hash:08x}")
+}
+
+pub(crate) fn require_string(params: &Value, key: &str) -> Result<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("{key} is required"))
+}
+
+pub(crate) fn validate_session_id(value: &str) -> ApiResult<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 80
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(api_error(StatusCode::BAD_REQUEST, "Invalid session id."));
+    }
+    Ok(value.to_string())
+}
+
+pub(crate) fn require_session_id(params: &Value, key: &str) -> Result<String> {
+    let value = require_string(params, key)?;
+    validate_session_id(&value).map_err(|error| {
+        anyhow!(
+            "{{\"code\":\"INVALID_SESSION_ID\",\"message\":\"{}\"}}",
+            error.message
+        )
+    })
+}
+
+pub(crate) fn query_param_value(query: Option<&str>, key: &str) -> Option<String> {
+    query?.split('&').find_map(|entry| {
+        let (raw_key, raw_value) = entry.split_once('=').unwrap_or((entry, ""));
+        if raw_key != key {
+            return None;
+        }
+        let decoded = raw_value.replace('+', "%20");
+        urlencoding::decode(&decoded)
+            .ok()
+            .map(|value| value.into_owned())
+    })
+}
+
+pub(crate) fn query_param_values(query: Option<&str>, key: &str) -> Vec<String> {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|entry| {
+            let (raw_key, raw_value) = entry.split_once('=').unwrap_or((entry, ""));
+            if raw_key != key {
+                return None;
+            }
+            let decoded = raw_value.replace('+', "%20");
+            urlencoding::decode(&decoded)
+                .ok()
+                .map(|value| value.into_owned())
+        })
+        .collect()
+}
+
+pub(crate) fn selected_skills_from_value(value: Option<&Value>) -> Vec<Value> {
+    let Some(entries) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let object = entry.as_object()?;
+            let name = object.get("name").and_then(Value::as_str)?.trim();
+            let path = object.get("path").and_then(Value::as_str)?.trim();
+            if name.is_empty() || path.is_empty() {
+                return None;
+            }
+            let id = object
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(path);
+            let key = format!("{name}\u{0}{path}");
+            if !seen.insert(key) {
+                return None;
+            }
+            Some(json!({
+                "id": id,
+                "name": name,
+                "path": path
+            }))
+        })
+        .collect()
+}
+
+pub(crate) enum NormalizedPath {
+    Redirect(String),
+    OutsideBase,
+    Route(String),
+}

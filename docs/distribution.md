@@ -1,0 +1,305 @@
+# Distribution
+
+## Goal
+
+The intended user-facing entrypoint is:
+
+```bash
+npx codex-webui
+```
+
+That implies the published package must be able to:
+
+- guide a first-time user through setup
+- start the server in the background
+- resolve a runnable Rust gateway binary for the current platform
+- serve the already-built static frontend bundle
+
+## What The Package Needs To Ship
+
+The npm package should include:
+
+- `bin/codex-webui.mjs`
+- the built static frontend under `build/static`
+- docs and helper scripts that the CLI depends on
+- Rust gateway binaries under `dist/backend/<target>/`
+
+The package already exposes:
+
+```json
+{
+  "bin": {
+    "codex-webui": "./bin/codex-webui.mjs"
+  }
+}
+```
+
+## CLI Contract
+
+`bin/codex-webui.mjs` is responsible for:
+
+- first-run interactive setup
+- reading and writing `~/.codex/codex-webui.yml`
+- starting, restarting, and stopping the background server
+- verifying the recorded background PID with a per-instance `/healthz` token before status, stop, or restart actions
+- printing the launch URL, PID, config path, and log path
+- exposing `config`, `status`, `restart`, `stop`, and richer `tunnel` management commands
+
+On first run, it prompts for:
+
+- host
+- port
+- base path
+- Codex binary path
+- data directory
+- profile count
+- per-profile id, label, Codex home, and optional profile-local data dir
+- default profile id
+- allowed roots
+- CORS origins
+- optional explicit backend binary path
+- password
+- optional hCaptcha site key and secret key
+
+The password is stored as a scrypt hash in the YAML config.
+
+## Generated Local State
+
+The CLI owns two user-local locations:
+
+- config: `~/.codex/codex-webui.yml`
+- background runtime state: `~/.codex/codex-webui/`
+
+That runtime state currently includes:
+
+- PID file
+- server metadata JSON with a per-instance verification token
+- server log
+- tunnel PID file
+- tunnel log
+- tunnel metadata JSON
+
+## Binary Resolution Order
+
+At runtime the CLI searches for a Rust gateway binary in this order:
+
+1. `backendBinaryPath` from `~/.codex/codex-webui.yml`
+2. `CODEX_WEBUI_BACKEND_BIN`
+3. `dist/backend/<current-target>/backend`
+4. `backend/target/release/backend`
+5. `backend/target/debug/backend`
+
+The `dist/backend/<target>/` path is the intended npm-distribution location.
+
+## ForgeOS Managed Gateway Releases
+
+End-user machines do not need Rust. Tagged CI builds produce an extracted
+gateway bundle containing the native binary, static frontend, target metadata,
+and the binary SHA-256 digest. After downloading and extracting the artifact:
+
+```bash
+codex-webui gateway install /path/to/forgeos-gateway-<version>-<target>
+codex-webui gateway status
+codex-webui gateway restart
+codex-webui gateway rollback
+```
+
+Installation verifies the platform target, confines manifest paths to the
+bundle directory, verifies the binary digest, copies the release into the
+user-local runtime directory, and atomically switches the active release
+pointer. The prior release remains available for rollback. If the replacement
+gateway cannot restart, the launcher restores the prior release pointer and
+starts the previous gateway.
+
+The managed release directory is under `~/.codex/codex-webui/gateway-releases/`.
+`gateway-release-state.json` records only the active and previous release.
+Explicit `backendBinaryPath` and `CODEX_WEBUI_BACKEND_BIN` overrides continue to
+take precedence for operators who intentionally manage their own binary.
+
+## Launch Model
+
+The CLI starts the Rust gateway as a detached background process and injects the resolved configuration through environment variables such as:
+
+- `CODEX_WEBUI_BASE_PATH`
+- `CODEX_WEBUI_CODEX_BIN`
+- `CODEX_HOME`
+- `CODEX_WEBUI_DATA_DIR`
+- `CODEX_WEBUI_DEFAULT_PROFILE_ID`
+- `CODEX_WEBUI_PROFILES_JSON`
+- `CODEX_WEBUI_ALLOWED_ROOTS`
+- `CODEX_WEBUI_PASSWORD_HASH`
+- `CODEX_WEBUI_OWNER_PASSWORD_HASH`
+- `CODEX_WEBUI_VIEWER_PASSWORD_HASH`
+- `CODEX_WEBUI_HCAPTCHA_SITE_KEY`
+- `CODEX_WEBUI_HCAPTCHA_SECRET_KEY`
+- `CODEX_WEBUI_SESSION_SECRET`
+- `CODEX_WEBUI_INSTANCE_TOKEN`
+- `CODEX_WEBUI_CORS_ALLOWED_ORIGINS`
+- `CODEX_WEBUI_WEBHOOK_ALLOWED_HOSTS`
+
+Plaintext password variables are only suitable for loopback development. The
+gateway rejects `CODEX_WEBUI_PASSWORD`, `CODEX_WEBUI_OWNER_PASSWORD`, and
+`CODEX_WEBUI_VIEWER_PASSWORD` when `HOST` is non-loopback; use the hash
+variables for any exposed, tunneled, or reverse-proxied deployment.
+Set `CODEX_WEBUI_WEBHOOK_ALLOWED_HOSTS` for public deployments that enable
+Slack or generic webhooks; it accepts exact host names and `*.example.com`
+wildcards.
+
+At runtime the public base path is owned by Rust, not baked permanently into the shipped SPA:
+
+- the static frontend is built with a placeholder base path
+- Rust serves `build/static`
+- Rust rewrites the placeholder in HTML, JS, and CSS responses to the configured `CODEX_WEBUI_BASE_PATH`
+- session, Git, and runtime APIs are served directly by the Rust gateway
+
+`CODEX_HOME` provides the default-profile home path at launch time, while `CODEX_WEBUI_PROFILES_JSON` remains the authoritative multi-profile runtime description.
+
+The CLI also accepts transient launch overrides:
+
+- `--hcaptcha-site-key <site-key>`
+- `--hcaptcha-secret-key <secret>`
+- `--disable-hcaptcha`
+
+Prefer the YAML config or environment variables for the secret key in long-lived deployments, because shell history and process inspection can expose command-line secrets.
+
+The CLI prints the workspace root URL, and the login experience is handled inline by the workspace shell.
+
+The CLI writes config, PID, server metadata, tunnel metadata, and tunnel log state through temp files followed by rename. On stop or restart, it refuses to signal the recorded PID unless the running gateway confirms the stored instance token through `/healthz`; stale files are removed only when the PID is no longer alive.
+
+Restart uses a handoff path on platforms where Codex supports Unix control sockets. Unix handoff is enabled by default. The gateway connects to each persistent app-server with Codex's native WebSocket framing over a private Unix socket; it no longer relies on the raw `app-server proxy` byte relay. The CLI asks the verified gateway to detach those connections, sends SIGTERM, waits for the gateway port to exit, and then starts the currently resolved backend binary. The replacement gateway reconnects to the same app-server processes, so package updates do not interrupt active turns. Restart preparation closes idle legacy stdio clients and refuses only when a stdio client still owns a turn, pending server request, or in-flight RPC. `CODEX_WEBUI_APP_SERVER_HANDOFF=false` therefore blocks restart only for live work that cannot be preserved.
+
+Startup keeps runtime profile state lightweight. The gateway restores persisted queue/shutdown metadata for every profile, but it does not start Codex app-server processes until a profile receives an active Codex request. `CODEX_WEBUI_MAX_APP_SERVERS` caps concurrent Codex app-server processes and defaults to an automatic CPU/memory-based value capped at `4`; `CODEX_WEBUI_PER_SESSION_APP_SERVERS=true` opts into one app-server per newly active session in the same profile, while the default keeps same-profile sessions on a shared app-server. `/goal` updates still dedicate an app-server to unassigned sessions because goal work is typically long-running. `CODEX_WEBUI_APP_SERVER_TIMEOUT_SECONDS` defaults to `600` so long-session `thread/read`, resume, and `turn/start` requests are not cut off during initial loading; `CODEX_WEBUI_SERVER_THREADS`, `CODEX_WEBUI_BLOCKING_THREADS`, `CODEX_WEBUI_SERVER_THREAD_STACK_BYTES`, and `CODEX_WEBUI_CONTROLLER_THREADS` can be tuned for larger hosts. On constrained code-server hosts, reduce worker counts before lowering stack size; too small a stack can crash deep session and JSON processing.
+
+For release verification on constrained hosts, run `pnpm gateway:build`,
+`pnpm build:e2e-fake`, then `pnpm verify:low-memory-smoke`. The smoke check
+starts the built gateway with a fake Codex app-server under an 8 GB POSIX
+virtual-memory limit by default, creates a session, sends one turn, reads the
+session back, and asserts that host-memory metrics are present. The script only
+terminates the child gateway process it spawned, avoiding broad process-group
+signals that could kill the invoking shell or code-server.
+
+Terminal sessions store the child PID plus Linux process start metadata when
+available. Cleanup and close actions re-check that identity before sending
+process-group signals, so a stale PID is not allowed to target a reused process
+group.
+
+When system shutdown support is enabled, the actual armed and scheduled state is still runtime data rather than static CLI config:
+
+- arming "shutdown after queue completes" happens through the running app
+- the armed flag and any scheduled shutdown timestamp are persisted under `CODEX_WEBUI_DATA_DIR`
+- the backend remains authoritative, so the shutdown can still execute without an attached browser session
+
+The Settings page also exposes a per-user automatic startup toggle:
+
+- Windows uses the current user's Startup folder
+- macOS uses `~/Library/LaunchAgents/`
+- Linux prefers `systemd --user` and falls back to XDG autostart desktop entries when user-systemd is unavailable
+- the generated startup entry launches the packaged `codex-webui` CLI, so normal config resolution and background PID handling stay unchanged
+
+## Tunnel Behavior
+
+The tunnel command family is:
+
+```bash
+codex-webui tunnel start [--provider auto|cloudflared|ngrok] [--foreground] [--hostname host] [--name tunnel] [--overwrite-dns] [--log-level level] [--arg value] [--yes]
+codex-webui tunnel status [--json]
+codex-webui tunnel stop
+codex-webui tunnel logs [--lines 80] [--json]
+```
+
+Behavior:
+
+1. `start` ensures the server is running first
+2. the provider defaults to the configured tunnel provider, or `auto`
+3. `auto` prefers `cloudflared` and falls back to `ngrok`
+4. background launches persist tunnel PID and metadata under `~/.codex/codex-webui/`
+5. `status` reports the provider, PID, origin URL, public URL when discovered, and log path
+6. `logs` prints the most recent tunnel log lines without requiring the user to hunt down the log file manually
+
+Before opening a public tunnel, the CLI prints a safety checklist covering the
+configured owner password, hCaptcha, allowed roots, and public route. Public
+tunnel mode requires `ownerPasswordHash` so terminal, runtime, shutdown, and
+other host-level actions cannot silently fall back to the normal admin role when
+the gateway is bound to loopback behind a tunnel. Interactive runs require the
+`Type "expose"` prompt to be answered with `expose`; non-interactive runs must
+pass `--yes` or set `CODEX_WEBUI_TUNNEL_ASSUME_YES=true`. This is intentional
+because a tunnel exposes Codex control, Git operations, file tools, runtime
+actions, and host terminals outside localhost.
+
+Provider notes:
+
+- `cloudflared` supports `--hostname`, `--name`, and `--overwrite-dns`
+- `ngrok` currently uses the generic `http <origin>` launch path plus any extra args supplied through config or repeated `--arg` flags
+- both providers assume the user has already installed and authenticated the relevant CLI where necessary
+
+## Cross Build
+
+Use:
+
+```bash
+pnpm build:cross
+```
+
+The helper script targets common platforms:
+
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+- `x86_64-pc-windows-msvc`
+
+Build preference order:
+
+1. `cargo-zigbuild`
+2. `cross`
+3. plain `cargo`
+
+Built binaries are copied to:
+
+```text
+dist/backend/<target>/
+```
+
+## Signed Windows Gateway Upgrade Bundle
+
+The `Gateway release bundles` GitHub workflow builds the native gateway on a
+real `windows-latest` MSVC runner. In addition to the portable bundle directory,
+the Windows job publishes a ZIP archive, a sibling `.sha256` checksum, and a
+GitHub build provenance attestation. PyPI is not involved in this distribution
+path.
+
+The local installer verifies the binary digest from `forgeos-gateway.json`
+before activating a release and retains one previous release for atomic
+rollback. Verify the outer ZIP checksum and GitHub attestation before giving the
+archive to the installer.
+
+## Release Notes For Maintainers
+
+Before publishing, check:
+
+1. `pnpm install`
+2. `pnpm build`
+3. `pnpm verify:static-build`
+4. `pnpm verify:api-parity`
+5. `pnpm verify:codex-protocol`
+6. `pnpm verify:security-regressions`
+7. `pnpm build:cross`
+8. `pnpm check`
+9. `cargo check --manifest-path backend/Cargo.toml`
+10. `pnpm exec playwright test e2e/base-path.spec.ts`
+11. `package.json` includes `bin`, `build`, `dist`, and docs
+12. `node ./bin/codex-webui.mjs` works from a clean checkout
+13. `npx .` or a packed tarball works on a machine that does not rely on local build artifacts by accident
+
+## Recommended Smoke Tests
+
+Before publishing a package, verify at least:
+
+- first-run interactive setup creates `~/.codex/codex-webui.yml`
+- `codex-webui` starts the background server and prints a usable URL
+- `codex-webui status` verifies the current instance rather than trusting a raw PID file
+- login works through the printed base path
+- WebSocket connection succeeds after login
+- `codex-webui restart` and `codex-webui stop` work
+- `codex-webui tunnel` selects the expected tunneling tool
+- the packaged binary resolution path works without a local Rust build tree

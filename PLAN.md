@@ -1,0 +1,414 @@
+# PLAN
+
+This document tracks the implementation direction for ForgeOS, built on the
+existing `codex-webui` runtime.
+
+## ForgeOS Product Direction
+
+ForgeOS is an enterprise AI-native development, release, and operations
+platform. The first-class entry is a persistent project rather than a global
+conversation list. Codex provides long-lived AI development inside each
+project; ForgeOS owns project context, engineering assurance, releases,
+environments, operations, governance, and audit.
+
+The product shell should keep the user inside one persistent project workspace:
+
+```text
+Enterprise project portal
+  -> Project workspace
+     -> Continuous Codex conversation
+     -> Files, Git, diff, and terminal
+     -> Build, validation, and engineering evidence
+     -> Release, artifact, approval, and rollback
+     -> Environment, deployment, logs, and health
+```
+
+Validation, review, checkpoints, evidence, and reports remain available as
+optional engineering tools. They must not become gates that interrupt ordinary
+conversation or force every development request into a separate ForgeTask.
+
+### Current Product Roadmap
+
+1. Make projects first-class persistent workspaces while keeping conversations
+   continuous inside each project.
+2. Deepen live conversation UX: execution activity, tool results, background
+   work, reconnect state, compaction, interruption, continuation, and history.
+3. Keep files, diff, Git, terminal, validation, review, memory, and settings
+   attached to the current conversation as secondary workspace surfaces.
+4. Improve Windows gateway startup, crash recovery, offline feedback, static
+   packaging, upgrade, and rollback without requiring end users to install Rust.
+5. Continue upstream Codex compatibility work without copying the Codex visual
+   identity or weakening the bounded large-history performance model.
+
+### Capability Delivery Status
+
+- Project containers now persist an allowed root directory, detected Git root,
+  safe model default, last opened conversation, and last opened timestamp.
+- Existing tag-only projects remain readable and can bind a root directory from
+  the project menu without migrating or deleting conversations.
+- New conversations inherit the active project's root, repository, and model;
+  opening a project restores its last conversation or its most recent remaining
+  conversation.
+- Conversation history resumes bounded automatic loading when a conversation is
+  selected. Existing cursor reconciliation, reconnect catch-up, background run
+  projection, context compaction, and browser caches remain the reliability
+  foundation.
+- Files, Git, diff, terminal, validation, review, diagnostics, and settings stay
+  closed until requested and open as secondary workspace surfaces. They are not
+  completion gates.
+- Each project now has an on-demand settings surface for root/Git/model
+  inspection, project-scoped full-text conversation search, and explicit
+  rename/remove migration previews. Rename migrates conversation membership
+  atomically; removal preserves conversations as unfiled history.
+- Prebuilt ForgeOS gateway bundles can be installed, restarted, and rolled back
+  by the Node launcher with target and SHA-256 verification. CI owns Rust
+  compilation, so operator machines do not need a Rust toolchain.
+- Continuous-session E2E coverage now exercises a running background turn,
+  browser offline/online recovery, page reload, and restoration of the same
+  conversation URL and transcript.
+- The project validation center now runs configured build, test, and static
+  analysis commands through the existing bounded terminal runtime, streams
+  output, supports cancellation, and keeps the latest 20 local evidence
+  records with command, exit code, duration, and bounded output. This remains
+  an on-demand project tool rather than a conversation completion gate.
+
+Next capability work should focus on project import/export, richer search
+snippets and ranking, gateway-persisted validation evidence tied to Git commits,
+release/artifact/approval data, signed release provenance beyond SHA-256, and
+broader multi-hour soak coverage for background sessions.
+
+The compatibility implementation notes below remain useful, but they are not a
+task-oriented ForgeOS product workflow.
+
+## Guiding Decisions
+
+### Keep The Custom Rollout Parser
+
+`codex-webui` must keep its Rust-side rollout parser and session index as the
+primary source for sidebar lists, search, recent-turn windows, and lazy item
+detail loading.
+
+Native Codex thread APIs are still valuable, but they are not the right primary
+path for large session histories. The current expectation is that native thread
+enumeration materializes substantially more session state than the web sidebar
+needs. On machines with many sessions or very long rollouts, that can make a
+simple session list take minutes, and in observed usage it can exceed ten
+minutes before the UI becomes useful.
+
+The parser should therefore be treated as a performance boundary:
+
+- use native Codex APIs as a correctness reference, reconciliation source, and
+  live-thread authority
+- keep sidebar list/search/detail bootstrapping on bounded local parsing
+- compare sampled parser output against native thread output to find parser
+  bugs
+- fix parser gaps directly instead of replacing the parser with native listing
+- never require loading full transcripts before the user can send, queue, steer,
+  or switch sessions
+
+### Prefer Native Protocols For Mutating Codex State
+
+When upstream Codex exposes an API that represents Codex-owned state directly,
+`codex-webui` should prefer the native API unless it conflicts with browser
+reconnect safety or large-history performance.
+
+This applies to:
+
+- archive and unarchive
+- memory controls
+- review and rollback actions
+- plugin, marketplace, skill, and MCP management
+- image generation, standalone web search, and other typed transcript items
+
+`thread/settings/update` is explicitly deferred for now. Existing
+`codex-webui` session preference synchronization stays in place until the
+native settings API is reviewed more deeply.
+
+## Implementation Order
+
+### 1. Parser Parity And Stability
+
+Objective: keep the custom parser, but make it easier to prove where it differs
+from native Codex output.
+
+Status: implemented for the current parser-hardening batch. Sidebar
+list/search/detail bootstrapping still uses bounded local parser and index
+reads. Diagnostics exposes a manual parser-vs-native comparison that compares
+summary metadata, timestamps, archive/subagent status, goal snapshots, and
+recent visible turns. Regression fixtures cover subagent filtering, stale
+running/status reconciliation, failed context compression tails, latest-response
+fallbacks, and corrupted/non-UTF-8 rollout recovery paths.
+
+Planned work:
+
+- add a sampled parser-vs-native comparison command or diagnostics panel [done]
+- compare title, created/updated timestamps, archived/subagent flags, latest
+  turn status, goal state, and visible recent items [done]
+- record mismatches with stable categories so they can be fixed one by one
+  [done]
+- add regression fixtures for known hard cases:
+  - subagent sessions appearing in the active list [done]
+  - crashed context-compression turns looking active [done]
+  - completed goal sessions retaining stale running state [done]
+  - latest assistant response missing until a full refresh [done]
+  - corrupted or non-UTF-8 rollout tails [done]
+
+Acceptance criteria:
+
+- sidebar loading still uses bounded parser/index reads
+- native APIs are not on the hot path for every session-list refresh
+- parser mismatch output is actionable enough to debug individual sessions
+
+### 2. `clientUserMessageId` Everywhere
+
+Objective: give every user-authored message a stable client id across send,
+steer, and queued dispatch paths.
+
+Status: implemented for current send, steer, queue, queued dispatch, and
+optimistic reconciliation paths. The browser generates stable client ids for
+composer submissions, the backend passes them to native `turn/start` and
+`turn/steer`, queue items persist them, queued dispatch reuses them, and tests
+cover native app-server propagation. Future work should focus on keeping this
+model intact as new message entry points are added.
+
+Planned work:
+
+- generate or preserve a client-side id for every composer submission [done]
+- pass `clientUserMessageId` to native `turn/start` [done]
+- pass `clientUserMessageId` to native `turn/steer` [done]
+- persist the same id on queue items before dispatch [done]
+- pass the stored id when queued items are dispatched [done]
+- reconcile optimistic user messages against Codex `userMessage.clientId`
+  instead of matching only by text or temporary local ids [done]
+- include the id in retry/dedupe logic so reconnect replay does not duplicate
+  visible messages [done]
+
+Acceptance criteria:
+
+- send, steer, queue, retry, and reconnect all use the same id model
+- optimistic user messages do not disappear and reappear as duplicates
+- queued items can be edited/reordered without losing their eventual
+  `clientUserMessageId`
+
+### 3. Diagnostics Workspace Tab
+
+Objective: expose runtime and parser diagnostics from the `Open` menu as a
+dedicated tab.
+
+Status: implemented for the current diagnostics surface. The `Open` menu has a
+Diagnostics tab with runtime status, WebSocket status, managed Codex processes,
+active/queued/attention session counts, recent runtime notifications,
+host-memory/OOM indicators, and explicit parser-vs-native comparison for a
+selected session. Expensive native comparison remains user-triggered so sidebar
+loading stays on the bounded parser/index path.
+
+Planned work:
+
+- add `Diagnostics` to the `Open` menu [done]
+- show gateway health, app-server processes, active sessions, queue drain state,
+  WebSocket status, cache sizes, parser/index status, and recent runtime errors
+  [done]
+- include parser-vs-native comparison tools from stage 1 [done]
+- make expensive checks explicit actions, not automatic page-load work [done]
+
+Acceptance criteria:
+
+- opening diagnostics does not start every Codex app-server
+- owner/admin-only data remains gated
+- large outputs are paged or lazy-loaded
+
+### 4. Native Archive And Unarchive
+
+Objective: move archive/restore actions onto upstream Codex APIs where possible.
+
+Status: implemented. Archive and restore actions call native `thread/archive`
+and `thread/unarchive`, runtime archive notifications reconcile sidebar state,
+and tests verify native thread state and sidebar visibility stay aligned.
+
+Planned work:
+
+- call native `thread/archive` and `thread/unarchive` for Codex-owned archive
+  state [done]
+- keep `codex-webui` local metadata only for browser-specific filters and
+  transition compatibility [done]
+- update sidebar parser/index reconciliation to respect native archive state
+  [done]
+- keep existing snackbar/error-code behavior [done]
+
+Acceptance criteria:
+
+- archive state matches Codex app/extension expectations
+- archived sessions do not reappear because of local index cache staleness
+
+### 5. Memory Workspace Tab
+
+Objective: add a first-class memory UI available from the `Open` menu.
+
+Status: implemented for the currently exposed upstream memory surface. The
+workspace inspects profile memory settings/storage without starting every
+app-server, calls native `memory/reset`, and exposes native
+`thread/memoryMode/set` for the selected session. Current Codex `thread/read`
+does not directly return memory mode, so the UI reports that limitation instead
+of inventing local state.
+
+Planned work:
+
+- add `Memory` to the `Open` menu [done]
+- display current memory mode/state where upstream exposes it [done]
+- support native memory reset where allowed [done]
+- clearly separate global/profile memory from per-session preferences [done]
+- include permission gating and audit logging for destructive memory actions
+  [done]
+
+Acceptance criteria:
+
+- memory state can be inspected without opening a chat session
+- destructive actions require the same owner/admin policy as other host-impacting
+  runtime operations
+
+### 6. Plugin, Marketplace, Skill, And MCP Management
+
+Objective: turn catalog visibility into actionable management surfaces.
+
+Status: implemented for the currently exposed upstream catalog and MCP
+surfaces. Settings now supports marketplace add/remove/upgrade, plugin
+detail/install/uninstall, native skill and hook list inspection, MCP server
+status/tool/resource inspection, MCP reload, and OAuth login launch. Extra skill
+root editing remains limited by upstream surface availability and can still be
+done through `config.toml`.
+
+Planned work:
+
+- manage native plugins:
+  - list installed plugins [done]
+  - inspect details [done]
+  - install/uninstall where supported [done]
+  - refresh plugin auth/cache state [done]
+- manage marketplace plugins:
+  - browse available plugins [done]
+  - add/remove/upgrade [done]
+  - surface install errors with structured error codes [done]
+- manage skills:
+  - list active skill roots [done]
+  - configure extra skill roots where supported
+    [deferred until upstream exposes a native mutable surface]
+  - show unavailable or invalid skill metadata clearly [done]
+- improve MCP management:
+  - list server status with native details [done]
+  - show tools/resources exposed by each server [done]
+  - expose restart/refresh actions only when safe [done]
+
+Acceptance criteria:
+
+- catalog changes invalidate cached composer/search data
+- viewer role receives redacted catalog data only
+- install/update operations are owner-gated and audited
+
+### 7. Rich Transcript Item Support
+
+Objective: render newer Codex transcript item types as first-class cards.
+
+Status: implemented for the current upstream-compatibility batch. The local rollout parser now mirrors upstream
+thread history for standalone web search begin/end events, image generation
+begin/end events, local image-view tool calls, review-mode entry/exit markers,
+and thread rollback markers. The chat UI renders generated images with
+open/download actions, local image-view references, structured web-search
+details, and review findings when upstream provides them. Native `review/start`
+is available through `/review`, and loaded user-message turns can execute native
+`thread/rollback` after an explicit confirmation. File-level rollback preview
+and rollback targets outside the loaded turn window are available through a
+lazy-loaded target picker.
+
+Planned work:
+
+- improve image generation item support:
+  - show generated images in chat [done]
+  - lazy-load large image payloads [done for session detail, older turns, stream events, and browser cache]
+  - include download/open actions [done]
+  - avoid embedding large base64 images in default session payloads [done]
+- add standalone web search cards:
+  - render query and status [done]
+  - render citations and result summary [done for rollout payloads that include
+    `summary`, `results`, `sources`, or `citations`; upstream currently exposes
+    `web_search_call.action` as the stable typed field]
+  - keep raw result details lazy-loaded [done]
+- add review mode UI:
+  - start review sessions [done via `/review`, with `--detached` support]
+  - display review-mode markers [done]
+  - show findings with file references and severity [done when present]
+  - link findings to file/diff tabs [done]
+- add rollback UI:
+  - list rollback targets [done with lazy-loaded explicit target picker]
+  - preview affected files before execution [done for file-change items in the
+    loaded rollback range]
+  - require confirmation for destructive rollback actions [done for direct thread rollback]
+
+Acceptance criteria:
+
+- new item types do not break older sessions
+- large generated media and search payloads stay collapsed/lazy by default
+- Codex history rollback clearly states that it does not revert file changes
+
+### 8. Deferred Native Thread Settings Sync
+
+Status: deferred.
+
+Native `thread/settings/update` should not be implemented in this batch.
+
+Before adopting it, verify:
+
+- how it interacts with existing `config.toml` sync
+- whether it replaces or only complements current session preference writes
+- how model, reasoning, plan mode, speed mode, sandbox, approval, language
+  bridge, and 100M-context settings are represented
+- how errors and unsupported fields are returned by upstream Codex
+
+## Test Strategy
+
+Each implementation stage should include targeted tests instead of relying on a
+full manual UI pass.
+
+Required coverage:
+
+- parser fixtures for large-history and stale-status edge cases
+- client id propagation tests for send, steer, and queue dispatch
+- WebSocket reconnect tests that replay client ids without duplicating messages
+- role-policy tests for diagnostics, memory, plugin, marketplace, skill, MCP,
+  review, rollback, and media payloads
+- lazy-loading tests for image generation and web search item details [done for
+  large image generation session detail and stream events; web search item detail
+  remains covered by deferred item payload tests]
+- archive/unarchive reconciliation tests against native Codex responses
+
+Manual checks should focus on:
+
+- very large session directories
+- mobile reconnect
+- browser refresh during active turn
+- multiple clients watching one session
+- code-server reverse-proxy/base-path deployment
+
+## Non-Goals For This Batch
+
+- Replacing the custom parser with native `thread/list`
+- Implementing native `thread/settings/update`
+- Starting every app-server at page load
+- Adding WebRTC as a required computer-use dependency
+- Making the browser the source of truth for Codex-owned session state
+
+## ForgeOS Enterprise Project Lifecycle
+
+The current ForgeOS product path keeps continuous Codex conversations as the
+development workspace and adds project-scoped lifecycle surfaces on demand.
+
+- project gateway persistence for validation, release, and operations [done]
+- Git commit, operator, and SHA-256 validation evidence binding [done]
+- artifact, approval, release, and rollback state model [done]
+- environment, controlled deployment, logs, and health checks [done]
+- bounded records, optimistic revision checks, role policy, and audit reuse [done]
+- legacy gateway browser-storage compatibility mode [done]
+- signed artifact storage and server-side artifact digest verification [done]
+- production approval policy and separation of duties [done]
+- GitHub Actions deployment adapter without storing credentials [done]
+- project audit timeline [done]
+- notification routing and operational metrics [next]

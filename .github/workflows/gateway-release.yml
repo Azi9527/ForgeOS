@@ -1,0 +1,71 @@
+name: Gateway release bundles
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "codex/enterprise-platform-*"
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  bundle:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend and native gateway
+        run: pnpm build
+      - name: Create verified ForgeOS gateway bundle
+        run: pnpm gateway:bundle ${{ matrix.target }}
+        env:
+          FORGEOS_GATEWAY_VERSION: ${{ github.ref_name }}
+      - name: Package Windows upgrade archive and checksum
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $bundle = Get-ChildItem -LiteralPath artifacts -Directory -Filter "forgeos-gateway-*-x86_64-pc-windows-msvc" | Select-Object -First 1
+          if ($null -eq $bundle) { throw "Windows gateway bundle was not created." }
+          $archive = "$($bundle.FullName).zip"
+          Compress-Archive -Path (Join-Path $bundle.FullName '*') -DestinationPath $archive -Force
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$archive.sha256" -Value "$digest  $($bundle.Name).zip" -Encoding utf8NoBOM
+      - name: Attest Windows gateway upgrade archive
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/*.zip
+      - name: Upload gateway bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: forgeos-gateway-${{ github.run_id }}-${{ matrix.target }}
+          path: artifacts/**
+          if-no-files-found: error
