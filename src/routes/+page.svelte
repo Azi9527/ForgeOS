@@ -2329,7 +2329,7 @@
       return composerQueueActionDisabled;
     }
 
-    return readOnlyRole || sending || startingMessage || submitComposerBusy || uploading;
+    return !runtime?.installed || readOnlyRole || sending || startingMessage || submitComposerBusy || uploading;
   });
   const recentComposerActionDisabled = $derived.by(() => {
     if (!lastComposerHistoryPrompt) {
