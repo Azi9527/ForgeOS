@@ -51,6 +51,7 @@ import type {
   ProjectAuditEntry,
   ProjectDeployment,
   ProjectEnvironment,
+  ProjectGovernance,
   ProjectLifecyclePayload,
   ProjectRelease,
   ProjectValidationCheck,
@@ -1061,6 +1062,10 @@ export const api = {
 
   recordProjectValidation(projectName: string, run: ProjectValidationRun, revision: number | null = null) {
     return ws.request<ProjectLifecyclePayload>("projectLifecycle/validation/record", { projectName, run, revision });
+  },
+
+  saveProjectGovernance(projectName: string, governance: ProjectGovernance, revision: number | null = null) {
+    return ws.request<ProjectLifecyclePayload>("projectLifecycle/governance/save", { projectName, governance, revision });
   },
 
   saveProjectRelease(projectName: string, artifacts: ProjectArtifact[], releases: ProjectRelease[], revision: number | null = null) {

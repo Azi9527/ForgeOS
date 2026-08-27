@@ -8,7 +8,7 @@
   import { api } from "$lib/api";
   import type {
     ProjectArtifact, ProjectAuditEntry, ProjectDeployment, ProjectEnvironment,
-    ProjectLifecyclePayload, ProjectRelease, SessionFolder
+    ProjectGovernance, ProjectLifecyclePayload, ProjectRelease, SessionFolder
   } from "$lib/types";
 
   let {
@@ -38,6 +38,14 @@
   let githubWorkflow = $state("");
   let githubRef = $state("main");
   let healthCommand = $state("");
+  let standardApprovals = $state(1);
+  let productionApprovals = $state(2);
+  let maxArtifacts = $state(50);
+  let maxAgeDays = $state(180);
+  let notifyApprovalRequested = $state(true);
+  let notifyReleaseCompleted = $state(true);
+  let notifyRollbackCompleted = $state(true);
+  let notifyDeploymentFailed = $state(true);
 
   const artifacts = $derived(lifecycle?.release.artifacts ?? []);
   const releases = $derived(lifecycle?.release.releases ?? []);
@@ -53,7 +61,18 @@
       updatedAt: null,
       validation: { checks: [], runs: [] },
       release: { artifacts: [], releases: [] },
-      operations: { environments: [], deployments: [] }
+      operations: { environments: [], deployments: [] },
+      governance: {
+        approvalPolicy: { standardApprovals: 1, productionApprovals: 2 },
+        artifactRetention: { maxArtifacts: 50, maxAgeDays: 180 },
+        notificationRoutes: {
+          approvalRequested: true,
+          releaseCompleted: true,
+          rollbackCompleted: true,
+          deploymentFailed: true
+        }
+      },
+      retentionStatus: { eligibleForArchive: [], protectedCount: 0, automaticDeletion: false }
     };
   }
 
@@ -97,7 +116,41 @@
       lifecycle = restoreLocal();
       persistenceMode = "local";
     }
+    standardApprovals = lifecycle.governance.approvalPolicy.standardApprovals;
+    productionApprovals = lifecycle.governance.approvalPolicy.productionApprovals;
+    maxArtifacts = lifecycle.governance.artifactRetention.maxArtifacts;
+    maxAgeDays = lifecycle.governance.artifactRetention.maxAgeDays;
+    notifyApprovalRequested = lifecycle.governance.notificationRoutes.approvalRequested;
+    notifyReleaseCompleted = lifecycle.governance.notificationRoutes.releaseCompleted;
+    notifyRollbackCompleted = lifecycle.governance.notificationRoutes.rollbackCompleted;
+    notifyDeploymentFailed = lifecycle.governance.notificationRoutes.deploymentFailed;
     await loadAudit();
+  }
+
+  function saveGovernance() {
+    void mutate(async () => {
+      if (!lifecycle) return;
+      const governance: ProjectGovernance = {
+        approvalPolicy: {
+          standardApprovals: Math.max(1, Math.min(5, Number(standardApprovals) || 1)),
+          productionApprovals: Math.max(2, Math.min(5, Number(productionApprovals) || 2))
+        },
+        artifactRetention: {
+          maxArtifacts: Math.max(1, Math.min(50, Number(maxArtifacts) || 50)),
+          maxAgeDays: Math.max(1, Math.min(3650, Number(maxAgeDays) || 180))
+        },
+        notificationRoutes: {
+          approvalRequested: notifyApprovalRequested,
+          releaseCompleted: notifyReleaseCompleted,
+          rollbackCompleted: notifyRollbackCompleted,
+          deploymentFailed: notifyDeploymentFailed
+        }
+      };
+      lifecycle = persistenceMode === "gateway"
+        ? await api.saveProjectGovernance(project.name, governance, lifecycle.revision)
+        : { ...lifecycle, governance };
+      persistLocal(lifecycle);
+    });
   }
 
   async function storeRelease(nextArtifacts: ProjectArtifact[], nextReleases: ProjectRelease[]) {
@@ -157,7 +210,9 @@
   }
 
   function requiredApprovals(release: ProjectRelease) {
-    return releaseEnvironment(release)?.kind === "production" ? 2 : 1;
+    return releaseEnvironment(release)?.kind === "production"
+      ? lifecycle?.governance.approvalPolicy.productionApprovals ?? 2
+      : lifecycle?.governance.approvalPolicy.standardApprovals ?? 1;
   }
 
   function stripAnsi(value: string) {
@@ -379,6 +434,7 @@
     const labels: Record<string, string> = {
       "projectLifecycle/validation/save": "更新验证方案",
       "projectLifecycle/validation/record": "记录验证证据",
+      "projectLifecycle/governance/save": "更新项目治理策略",
       "projectLifecycle/release/save": "变更发布状态",
       "projectLifecycle/operations/save": "变更运维状态",
       "projectArtifacts/upload": "上传并签名制品"
@@ -410,6 +466,44 @@
         <article class="rounded-2xl border border-slate-200 bg-white p-5"><p class="text-xs font-bold text-slate-500">已签名制品</p><p class="mt-4 text-lg font-bold text-slate-950">{artifacts.filter((item) => item.signatureVerified).length} / {artifacts.length}</p><p class="mt-2 text-xs text-slate-400">服务端摘要与签名验证</p></article>
         <article class="rounded-2xl border border-slate-200 bg-white p-5"><p class="text-xs font-bold text-slate-500">当前版本</p><p class="mt-4 text-lg font-bold text-slate-950">{latestRelease?.version ?? "尚未创建"}</p><p class="mt-2 text-xs text-slate-400">{latestRelease?.status ?? "等待制品"}</p></article>
       </div>
+
+      <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-5">
+        <div class="flex flex-wrap items-start gap-4">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2"><ShieldCheck class="text-violet-600" size={18} /><h2 class="text-sm font-bold text-slate-900">企业发布策略</h2></div>
+            <p class="mt-2 text-xs leading-5 text-slate-500">项目所有者可配置审批人数、制品保留窗口和企业通知路由。生产发布始终要求所有者参与，并且只能使用网关验证过的签名制品。</p>
+          </div>
+          <button class="inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50" disabled={busy || readOnly} onclick={saveGovernance} type="button"><Save size={14} />保存治理策略</button>
+        </div>
+        <div class="mt-4 grid gap-4 lg:grid-cols-3">
+          <div class="rounded-xl bg-slate-50 p-4">
+            <p class="text-xs font-bold text-slate-800">审批门禁</p>
+            <div class="mt-3 grid grid-cols-2 gap-3">
+              <label class="text-[11px] text-slate-500">普通环境<input class="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" type="number" min="1" max="5" bind:value={standardApprovals} /></label>
+              <label class="text-[11px] text-slate-500">生产环境<input class="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" type="number" min="2" max="5" bind:value={productionApprovals} /></label>
+            </div>
+            <p class="mt-2 text-[10px] leading-4 text-slate-400">生产审批至少 2 人，且必须包含项目所有者。</p>
+          </div>
+          <div class="rounded-xl bg-slate-50 p-4">
+            <p class="text-xs font-bold text-slate-800">制品保留</p>
+            <div class="mt-3 grid grid-cols-2 gap-3">
+              <label class="text-[11px] text-slate-500">活跃制品上限<input class="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" type="number" min="1" max="50" bind:value={maxArtifacts} /></label>
+              <label class="text-[11px] text-slate-500">保留天数<input class="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" type="number" min="1" max="3650" bind:value={maxAgeDays} /></label>
+            </div>
+            <p class="mt-2 text-[10px] leading-4 text-slate-400">{lifecycle?.retentionStatus.eligibleForArchive.length ?? 0} 个制品达到归档条件；本阶段不自动删除，已发布制品始终受保护。</p>
+          </div>
+          <div class="rounded-xl bg-slate-50 p-4">
+            <p class="text-xs font-bold text-slate-800">企业通知路由</p>
+            <div class="mt-3 grid grid-cols-2 gap-2 text-[11px] text-slate-600">
+              <label class="flex items-center gap-2"><input type="checkbox" bind:checked={notifyApprovalRequested} />等待审批</label>
+              <label class="flex items-center gap-2"><input type="checkbox" bind:checked={notifyReleaseCompleted} />发布完成</label>
+              <label class="flex items-center gap-2"><input type="checkbox" bind:checked={notifyRollbackCompleted} />版本回滚</label>
+              <label class="flex items-center gap-2"><input type="checkbox" bind:checked={notifyDeploymentFailed} />部署失败</label>
+            </div>
+            <p class="mt-3 text-[10px] leading-4 text-slate-400">事件进入站内通知，并按系统设置投递到 Slack 或企业 Webhook。</p>
+          </div>
+        </div>
+      </section>
 
       <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-5">
         <div class="flex items-center gap-2"><Upload class="text-violet-600" size={18} /><h2 class="text-sm font-bold text-slate-900">上传发布制品</h2></div>

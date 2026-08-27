@@ -17,7 +17,59 @@ fn lifecycle_default_has_bounded_empty_sections() {
             "updatedAt": Value::Null,
             "validation": { "checks": [], "runs": [] },
             "release": { "artifacts": [], "releases": [] },
-            "operations": { "environments": [], "deployments": [] }
+            "operations": { "environments": [], "deployments": [] },
+            "governance": default_project_governance()
+        })
+    );
+}
+
+#[test]
+fn governance_is_bounded_and_keeps_secure_production_minimums() {
+    let governance = normalized_project_governance(Some(&json!({
+        "approvalPolicy": { "standardApprovals": 0, "productionApprovals": 1 },
+        "artifactRetention": { "maxArtifacts": 500, "maxAgeDays": 0 },
+        "notificationRoutes": { "approvalRequested": false }
+    })));
+    assert_eq!(
+        governance,
+        json!({
+            "approvalPolicy": { "standardApprovals": 1, "productionApprovals": 2 },
+            "artifactRetention": { "maxArtifacts": 50, "maxAgeDays": 1 },
+            "notificationRoutes": {
+                "approvalRequested": false,
+                "releaseCompleted": true,
+                "rollbackCompleted": true,
+                "deploymentFailed": true
+            }
+        })
+    );
+}
+
+#[test]
+fn retention_marks_only_unprotected_expired_artifacts_for_archive() {
+    let now = now_unix_ms();
+    let lifecycle = json!({
+        "governance": {
+            "artifactRetention": { "maxArtifacts": 1, "maxAgeDays": 1 }
+        },
+        "release": {
+            "artifacts": [
+                { "id": "released", "createdAt": 1 },
+                { "id": "fresh", "createdAt": now },
+                { "id": "old", "createdAt": 1 }
+            ],
+            "releases": [{
+                "status": "released",
+                "artifactIds": ["released"]
+            }]
+        }
+    });
+    assert_eq!(
+        artifact_retention_status(&lifecycle),
+        json!({
+            "eligibleForArchive": ["old"],
+            "protectedCount": 1,
+            "automaticDeletion": false
         })
     );
 }
@@ -145,6 +197,29 @@ fn production_release_requires_two_distinct_approvers_including_owner() {
         ]
     });
     assert!(validate_release_policy(&lifecycle, &two_approvals).is_ok());
+}
+
+#[test]
+fn configured_production_approval_count_is_enforced() {
+    let lifecycle = json!({
+        "governance": { "approvalPolicy": { "productionApprovals": 3 } },
+        "operations": {
+            "environments": [{ "id": "production", "kind": "production" }]
+        },
+        "release": {
+            "artifacts": [{ "id": "artifact-1", "signatureVerified": true }]
+        }
+    });
+    let release = json!({
+        "status": "released",
+        "targetEnvironmentId": "production",
+        "artifactIds": ["artifact-1"],
+        "approvals": [
+            { "profileId": "operator-a", "role": "owner" },
+            { "profileId": "operator-b", "role": "admin" }
+        ]
+    });
+    assert!(validate_release_policy(&lifecycle, &release).is_err());
 }
 
 #[test]

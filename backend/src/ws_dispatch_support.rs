@@ -527,6 +527,9 @@ pub(crate) async fn execute_ws_method(
                 .await
                 .map_err(anyhow::Error::from)
         }
+        "projectLifecycle/governance/save" => save_project_governance_payload(state, auth, params)
+            .await
+            .map_err(anyhow::Error::from),
         "projectLifecycle/release/save" => save_project_release_payload(state, auth, params)
             .await
             .map_err(anyhow::Error::from),

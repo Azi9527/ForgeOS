@@ -37,7 +37,11 @@ pub(crate) fn default_notification_settings_value() -> Value {
             "sessionCompleted",
             "sessionAttention",
             "queueDispatchFailed",
-            "shutdownScheduled"
+            "shutdownScheduled",
+            "projectApprovalRequested",
+            "projectReleaseCompleted",
+            "projectRollbackCompleted",
+            "projectDeploymentFailed"
         ],
         "slackWebhookUrl": Value::Null,
         "webhookUrl": Value::Null
@@ -228,7 +232,14 @@ fn append_data_recovery_event(
 pub(crate) fn is_valid_notification_event_type(value: &str) -> bool {
     matches!(
         value,
-        "sessionCompleted" | "sessionAttention" | "queueDispatchFailed" | "shutdownScheduled"
+        "sessionCompleted"
+            | "sessionAttention"
+            | "queueDispatchFailed"
+            | "shutdownScheduled"
+            | "projectApprovalRequested"
+            | "projectReleaseCompleted"
+            | "projectRollbackCompleted"
+            | "projectDeploymentFailed"
     )
 }
 
@@ -251,6 +262,10 @@ pub(crate) fn normalize_notification_settings_value(value: Option<&Value>) -> Va
                 "sessionAttention".to_string(),
                 "queueDispatchFailed".to_string(),
                 "shutdownScheduled".to_string(),
+                "projectApprovalRequested".to_string(),
+                "projectReleaseCompleted".to_string(),
+                "projectRollbackCompleted".to_string(),
+                "projectDeploymentFailed".to_string(),
             ]
         });
 

@@ -45,6 +45,7 @@ pub(crate) fn ws_method_requires_owner(method: &str, params: &Value) -> bool {
             | "runtime/update"
             | "gateway/restart"
             | "memory/reset"
+            | "projectLifecycle/governance/save"
             | "terminal/list"
             | "terminal/create"
             | "terminal/read"

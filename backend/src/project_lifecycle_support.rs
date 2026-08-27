@@ -13,6 +13,25 @@ const MAX_ENVIRONMENTS: usize = 20;
 const MAX_DEPLOYMENTS: usize = 50;
 const MAX_EVIDENCE_OUTPUT_BYTES: usize = 12_000;
 
+fn default_project_governance() -> Value {
+    json!({
+        "approvalPolicy": {
+            "standardApprovals": 1,
+            "productionApprovals": 2
+        },
+        "artifactRetention": {
+            "maxArtifacts": 50,
+            "maxAgeDays": 180
+        },
+        "notificationRoutes": {
+            "approvalRequested": true,
+            "releaseCompleted": true,
+            "rollbackCompleted": true,
+            "deploymentFailed": true
+        }
+    })
+}
+
 fn lifecycle_default(project_name: &str) -> Value {
     json!({
         "projectName": project_name,
@@ -20,8 +39,40 @@ fn lifecycle_default(project_name: &str) -> Value {
         "updatedAt": Value::Null,
         "validation": { "checks": [], "runs": [] },
         "release": { "artifacts": [], "releases": [] },
-        "operations": { "environments": [], "deployments": [] }
+        "operations": { "environments": [], "deployments": [] },
+        "governance": default_project_governance()
     })
+}
+
+fn normalized_project_governance(value: Option<&Value>) -> Value {
+    let approval = value.and_then(|entry| entry.get("approvalPolicy"));
+    let retention = value.and_then(|entry| entry.get("artifactRetention"));
+    let routes = value.and_then(|entry| entry.get("notificationRoutes"));
+    json!({
+        "approvalPolicy": {
+            "standardApprovals": approval.and_then(|entry| entry.get("standardApprovals")).and_then(Value::as_u64).unwrap_or(1).clamp(1, 5),
+            "productionApprovals": approval.and_then(|entry| entry.get("productionApprovals")).and_then(Value::as_u64).unwrap_or(2).clamp(2, 5)
+        },
+        "artifactRetention": {
+            "maxArtifacts": retention.and_then(|entry| entry.get("maxArtifacts")).and_then(Value::as_u64).unwrap_or(50).clamp(1, MAX_ARTIFACTS as u64),
+            "maxAgeDays": retention.and_then(|entry| entry.get("maxAgeDays")).and_then(Value::as_u64).unwrap_or(180).clamp(1, 3_650)
+        },
+        "notificationRoutes": {
+            "approvalRequested": routes.and_then(|entry| entry.get("approvalRequested")).and_then(Value::as_bool).unwrap_or(true),
+            "releaseCompleted": routes.and_then(|entry| entry.get("releaseCompleted")).and_then(Value::as_bool).unwrap_or(true),
+            "rollbackCompleted": routes.and_then(|entry| entry.get("rollbackCompleted")).and_then(Value::as_bool).unwrap_or(true),
+            "deploymentFailed": routes.and_then(|entry| entry.get("deploymentFailed")).and_then(Value::as_bool).unwrap_or(true)
+        }
+    })
+}
+
+fn governance_u64(lifecycle: &Value, section: &str, field: &str, fallback: u64) -> u64 {
+    lifecycle
+        .get("governance")
+        .and_then(|value| value.get(section))
+        .and_then(|value| value.get(field))
+        .and_then(Value::as_u64)
+        .unwrap_or(fallback)
 }
 
 fn require_project_name(params: &Value) -> ApiResult<String> {
@@ -325,10 +376,20 @@ fn validate_release_policy(lifecycle: &Value, release: &Value) -> ApiResult<()> 
     let owner_approved = approvals
         .iter()
         .any(|approval| approval.get("role").and_then(Value::as_str) == Some("owner"));
-    if production && (distinct_approvers < 2 || !owner_approved) {
+    let required_approvals = governance_u64(
+        lifecycle,
+        "approvalPolicy",
+        if production {
+            "productionApprovals"
+        } else {
+            "standardApprovals"
+        },
+        if production { 2 } else { 1 },
+    ) as usize;
+    if production && (distinct_approvers < required_approvals || !owner_approved) {
         return Err(api_error(
             StatusCode::CONFLICT,
-            "Production release requires two distinct approvers including an owner.",
+            "Production release does not satisfy the configured approval policy.",
         ));
     }
     if production {
@@ -360,13 +421,76 @@ fn validate_release_policy(lifecycle: &Value, release: &Value) -> ApiResult<()> 
             ));
         }
     }
-    if !production && distinct_approvers < 1 {
+    if !production && distinct_approvers < required_approvals {
         return Err(api_error(
             StatusCode::CONFLICT,
-            "Release requires at least one approver.",
+            "Release does not satisfy the configured approval policy.",
         ));
     }
     Ok(())
+}
+
+fn artifact_retention_status(lifecycle: &Value) -> Value {
+    let releases = lifecycle["release"]["releases"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let protected_ids = releases
+        .iter()
+        .filter(|release| {
+            matches!(
+                release.get("status").and_then(Value::as_str),
+                Some("released" | "rolledBack")
+            )
+        })
+        .flat_map(|release| {
+            release
+                .get("artifactIds")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .collect::<HashSet<_>>();
+    let max_artifacts = governance_u64(
+        lifecycle,
+        "artifactRetention",
+        "maxArtifacts",
+        MAX_ARTIFACTS as u64,
+    ) as usize;
+    let max_age_ms = governance_u64(lifecycle, "artifactRetention", "maxAgeDays", 180)
+        .saturating_mul(24 * 60 * 60 * 1_000);
+    let cutoff = now_unix_ms().saturating_sub(max_age_ms);
+    let artifacts = lifecycle["release"]["artifacts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut active_count = 0;
+    let mut eligible_ids = Vec::new();
+    for artifact in artifacts {
+        let artifact_id = artifact
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let protected = protected_ids.contains(artifact_id);
+        let fresh = artifact
+            .get("createdAt")
+            .and_then(Value::as_u64)
+            .is_none_or(|created_at| created_at >= cutoff);
+        if protected {
+            continue;
+        }
+        if fresh && active_count < max_artifacts {
+            active_count += 1;
+        } else if !artifact_id.is_empty() {
+            eligible_ids.push(artifact_id.to_string());
+        }
+    }
+    json!({
+        "eligibleForArchive": eligible_ids,
+        "protectedCount": protected_ids.len(),
+        "automaticDeletion": false
+    })
 }
 
 fn normalized_environment(value: &Value) -> Option<Value> {
@@ -465,12 +589,15 @@ fn require_matching_revision(current: &Value, params: &Value) -> ApiResult<()> {
 }
 
 fn lifecycle_from_state(ui_state: &Value, project_name: &str) -> Value {
-    ui_state
+    let mut lifecycle = ui_state
         .get("projectLifecycleByName")
         .and_then(Value::as_object)
         .and_then(|entries| entries.get(project_name))
         .cloned()
-        .unwrap_or_else(|| lifecycle_default(project_name))
+        .unwrap_or_else(|| lifecycle_default(project_name));
+    lifecycle["governance"] = normalized_project_governance(lifecycle.get("governance"));
+    lifecycle["retentionStatus"] = artifact_retention_status(&lifecycle);
+    lifecycle
 }
 
 pub(crate) async fn get_project_lifecycle_payload(
@@ -575,71 +702,225 @@ pub(crate) async fn record_project_validation_payload(
     .await
 }
 
+pub(crate) async fn save_project_governance_payload(
+    state: &AppState,
+    auth: &AuthContext,
+    params: Value,
+) -> ApiResult<Value> {
+    if auth.role != UserRole::Owner {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "Only the owner can change project governance policy.",
+        ));
+    }
+    update_project_lifecycle(state, &auth.profile_id, params, |lifecycle, params| {
+        lifecycle["governance"] = normalized_project_governance(params.get("governance"));
+        lifecycle["retentionStatus"] = artifact_retention_status(lifecycle);
+        Ok(())
+    })
+    .await
+}
+
+fn project_notification_route_enabled(lifecycle: &Value, route: &str) -> bool {
+    lifecycle
+        .get("governance")
+        .and_then(|value| value.get("notificationRoutes"))
+        .and_then(|value| value.get(route))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+fn item_status<'a>(items: &'a [Value], id: &str) -> Option<&'a str> {
+    items
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|item| item.get("status"))
+        .and_then(Value::as_str)
+}
+
+async fn emit_project_release_notifications(
+    state: &AppState,
+    profile_id: &str,
+    project_name: &str,
+    previous: &Value,
+    current: &Value,
+) {
+    let previous_releases = previous["release"]["releases"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let current_releases = current["release"]["releases"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for release in current_releases {
+        let id = release
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let status = release
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if item_status(&previous_releases, id) == Some(status) {
+            continue;
+        }
+        let route = match status {
+            "awaitingApproval" => Some(("approvalRequested", "projectApprovalRequested")),
+            "released" => Some(("releaseCompleted", "projectReleaseCompleted")),
+            "rolledBack" => Some(("rollbackCompleted", "projectRollbackCompleted")),
+            _ => None,
+        };
+        if let Some((route, event_type)) = route
+            && project_notification_route_enabled(current, route)
+        {
+            enqueue_profile_notification(
+                state,
+                profile_id,
+                event_type,
+                None,
+                json!({
+                    "projectName": project_name,
+                    "releaseId": id,
+                    "version": release.get("version").cloned().unwrap_or(Value::Null),
+                    "status": status
+                }),
+            )
+            .await;
+        }
+    }
+}
+
+async fn emit_project_deployment_notifications(
+    state: &AppState,
+    profile_id: &str,
+    project_name: &str,
+    previous: &Value,
+    current: &Value,
+) {
+    if !project_notification_route_enabled(current, "deploymentFailed") {
+        return;
+    }
+    let previous_deployments = previous["operations"]["deployments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let current_deployments = current["operations"]["deployments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for deployment in current_deployments {
+        let id = deployment
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if deployment.get("status").and_then(Value::as_str) == Some("failed")
+            && item_status(&previous_deployments, id) != Some("failed")
+        {
+            enqueue_profile_notification(
+                state,
+                profile_id,
+                "projectDeploymentFailed",
+                None,
+                json!({
+                    "projectName": project_name,
+                    "deploymentId": id,
+                    "releaseId": deployment.get("releaseId").cloned().unwrap_or(Value::Null),
+                    "environmentId": deployment.get("environmentId").cloned().unwrap_or(Value::Null),
+                    "exitCode": deployment.get("exitCode").cloned().unwrap_or(Value::Null)
+                }),
+            )
+            .await;
+        }
+    }
+}
+
 pub(crate) async fn save_project_release_payload(
     state: &AppState,
     auth: &AuthContext,
     params: Value,
 ) -> ApiResult<Value> {
     let project_name = require_project_name(&params)?;
+    let previous = get_project_lifecycle_payload(
+        state,
+        &auth.profile_id,
+        json!({ "projectName": project_name.clone() }),
+    )
+    .await?;
     let signing_key = artifact_signing_key(state, &auth.profile_id).await?;
-    update_project_lifecycle(state, &auth.profile_id, params, move |lifecycle, params| {
-        let current_artifacts = lifecycle["release"]["artifacts"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let current_releases = lifecycle["release"]["releases"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        for value in params
-            .get("releases")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let existing = current_releases
-                .iter()
-                .find(|entry| entry.get("id") == value.get("id"));
-            validate_release_transition(value, existing)?;
-        }
-        let artifacts = params
-            .get("artifacts")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|value| {
-                let existing = current_artifacts
-                    .iter()
-                    .find(|entry| entry.get("id") == value.get("id"));
-                let signature_verified =
-                    artifact_manifest_signature_is_valid(&signing_key, &project_name, value);
-                normalized_artifact(value, auth, existing, signature_verified)
-            })
-            .take(MAX_ARTIFACTS)
-            .collect::<Vec<_>>();
-        let releases = params
-            .get("releases")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|value| {
+    let signing_project_name = project_name.clone();
+    let updated =
+        update_project_lifecycle(state, &auth.profile_id, params, move |lifecycle, params| {
+            let current_artifacts = lifecycle["release"]["artifacts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let current_releases = lifecycle["release"]["releases"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for value in params
+                .get("releases")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
                 let existing = current_releases
                     .iter()
                     .find(|entry| entry.get("id") == value.get("id"));
-                normalized_release(value, auth, existing)
-            })
-            .take(MAX_RELEASES)
-            .collect::<Vec<_>>();
-        for release in &releases {
-            validate_release_policy(lifecycle, release)?;
-        }
-        lifecycle["release"] = json!({
-            "artifacts": artifacts,
-            "releases": releases
-        });
-        Ok(())
-    })
-    .await
+                validate_release_transition(value, existing)?;
+            }
+            let artifacts = params
+                .get("artifacts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| {
+                    let existing = current_artifacts
+                        .iter()
+                        .find(|entry| entry.get("id") == value.get("id"));
+                    let signature_verified = artifact_manifest_signature_is_valid(
+                        &signing_key,
+                        &signing_project_name,
+                        value,
+                    );
+                    normalized_artifact(value, auth, existing, signature_verified)
+                })
+                .take(MAX_ARTIFACTS)
+                .collect::<Vec<_>>();
+            let releases = params
+                .get("releases")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| {
+                    let existing = current_releases
+                        .iter()
+                        .find(|entry| entry.get("id") == value.get("id"));
+                    normalized_release(value, auth, existing)
+                })
+                .take(MAX_RELEASES)
+                .collect::<Vec<_>>();
+            let mut proposed = lifecycle.clone();
+            proposed["release"] = json!({
+                "artifacts": artifacts,
+                "releases": releases
+            });
+            for release in proposed["release"]["releases"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                validate_release_policy(&proposed, release)?;
+            }
+            proposed["retentionStatus"] = artifact_retention_status(&proposed);
+            *lifecycle = proposed;
+            Ok(())
+        })
+        .await?;
+    emit_project_release_notifications(state, &auth.profile_id, &project_name, &previous, &updated)
+        .await;
+    Ok(updated)
 }
 
 pub(crate) async fn save_project_operations_payload(
@@ -647,7 +928,14 @@ pub(crate) async fn save_project_operations_payload(
     auth: &AuthContext,
     params: Value,
 ) -> ApiResult<Value> {
-    update_project_lifecycle(state, &auth.profile_id, params, |lifecycle, params| {
+    let project_name = require_project_name(&params)?;
+    let previous = get_project_lifecycle_payload(
+        state,
+        &auth.profile_id,
+        json!({ "projectName": project_name.clone() }),
+    )
+    .await?;
+    let updated = update_project_lifecycle(state, &auth.profile_id, params, |lifecycle, params| {
         let current_deployments = lifecycle["operations"]["deployments"]
             .as_array()
             .cloned()
@@ -679,7 +967,16 @@ pub(crate) async fn save_project_operations_payload(
         });
         Ok(())
     })
-    .await
+    .await?;
+    emit_project_deployment_notifications(
+        state,
+        &auth.profile_id,
+        &project_name,
+        &previous,
+        &updated,
+    )
+    .await;
+    Ok(updated)
 }
 
 pub(crate) async fn list_project_audit_payload(

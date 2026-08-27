@@ -633,6 +633,10 @@
     if (eventType === "queueDispatchFailed") {
       return ui.notificationQueueFailed;
     }
+    if (eventType === "projectApprovalRequested") return "项目等待审批";
+    if (eventType === "projectReleaseCompleted") return "项目发布完成";
+    if (eventType === "projectRollbackCompleted") return "项目版本回滚";
+    if (eventType === "projectDeploymentFailed") return "项目部署失败";
     return ui.notificationShutdownScheduled;
   }
 
@@ -1898,7 +1902,7 @@
             </div>
             <div class="catalog-list">
               <p class="field-note">{ui.notificationEvents}</p>
-              {#each ["sessionCompleted", "sessionAttention", "queueDispatchFailed", "shutdownScheduled"] as eventType (eventType)}
+              {#each ["sessionCompleted", "sessionAttention", "queueDispatchFailed", "shutdownScheduled", "projectApprovalRequested", "projectReleaseCompleted", "projectRollbackCompleted", "projectDeploymentFailed"] as eventType (eventType)}
                 <label class="checkbox-card checkbox-card--compact">
                   <input
                     class="checkbox-input"

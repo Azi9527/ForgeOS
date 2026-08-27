@@ -193,6 +193,23 @@ export type ProjectDeployment = {
   operator: ProjectLifecycleOperator | null;
 };
 
+export type ProjectGovernance = {
+  approvalPolicy: {
+    standardApprovals: number;
+    productionApprovals: number;
+  };
+  artifactRetention: {
+    maxArtifacts: number;
+    maxAgeDays: number;
+  };
+  notificationRoutes: {
+    approvalRequested: boolean;
+    releaseCompleted: boolean;
+    rollbackCompleted: boolean;
+    deploymentFailed: boolean;
+  };
+};
+
 export type ProjectLifecyclePayload = {
   projectName: string;
   revision: number;
@@ -200,6 +217,12 @@ export type ProjectLifecyclePayload = {
   validation: { checks: ProjectValidationCheck[]; runs: ProjectValidationRun[] };
   release: { artifacts: ProjectArtifact[]; releases: ProjectRelease[] };
   operations: { environments: ProjectEnvironment[]; deployments: ProjectDeployment[] };
+  governance: ProjectGovernance;
+  retentionStatus: {
+    eligibleForArchive: string[];
+    protectedCount: number;
+    automaticDeletion: false;
+  };
 };
 
 export type ProjectAuditEntry = {
@@ -478,7 +501,15 @@ export type StartupDataRecoveryEvent = {
   restoredFromBackup: boolean;
 };
 
-export type NotificationEventType = "sessionCompleted" | "sessionAttention" | "queueDispatchFailed" | "shutdownScheduled";
+export type NotificationEventType =
+  | "sessionCompleted"
+  | "sessionAttention"
+  | "queueDispatchFailed"
+  | "shutdownScheduled"
+  | "projectApprovalRequested"
+  | "projectReleaseCompleted"
+  | "projectRollbackCompleted"
+  | "projectDeploymentFailed";
 
 export type NotificationSettings = {
   enabledEventTypes: NotificationEventType[];
