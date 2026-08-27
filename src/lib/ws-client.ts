@@ -264,6 +264,15 @@ export class WebSocketRpcClient {
   private defaultProfileId: string | null = null;
   private incomingMessageChain: Promise<void> = Promise.resolve();
 
+  constructor() {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.addEventListener("offline", () => this.handleOffline());
+    window.addEventListener("online", () => this.reconnectNow());
+  }
+
   setDefaultProfileId(profileId: string | null | undefined) {
     const normalized = typeof profileId === "string" && profileId.trim() ? profileId.trim() : null;
     this.defaultProfileId = normalized;
@@ -564,6 +573,11 @@ export class WebSocketRpcClient {
 
   private ensureConnected() {
     if (typeof window === "undefined") {
+      return;
+    }
+
+    if (navigator.onLine === false) {
+      this.setConnectionState(this.hasConnectedOnce ? "reconnecting" : "connecting");
       return;
     }
 
@@ -1216,6 +1230,29 @@ export class WebSocketRpcClient {
     }
 
     this.ensureConnected();
+  }
+
+  private handleOffline() {
+    if (!this.hasConnectionDemand()) {
+      return;
+    }
+
+    const socket = this.socket;
+    this.socket = null;
+    this.manualClose = false;
+    this.stopHeartbeat();
+    this.clearConnectTimeout();
+    this.clearPongTimeout();
+    this.invalidateSubscriptionAcks();
+    this.setConnectionState(this.hasConnectedOnce ? "reconnecting" : "connecting");
+
+    if (socket && socket.readyState !== WebSocket.CLOSING && socket.readyState !== WebSocket.CLOSED) {
+      try {
+        socket.close();
+      } catch {
+        // The browser's online event will establish a replacement connection.
+      }
+    }
   }
 
   private buildWebSocketUrl() {
