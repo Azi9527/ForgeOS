@@ -122,8 +122,7 @@ async fn websocket_session(
     gzip_responses: bool,
 ) {
     let (mut sender, mut receiver) = socket.split();
-    let (out_tx, mut out_rx, mut invalidation_rx) =
-        WsOutbound::new(WS_OUTBOUND_QUEUE_CAPACITY);
+    let (out_tx, mut out_rx, mut invalidation_rx) = WsOutbound::new(WS_OUTBOUND_QUEUE_CAPACITY);
     let connection_id = Uuid::new_v4().to_string();
     let subscriptions: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>> =
         Arc::new(Mutex::new(HashMap::new()));

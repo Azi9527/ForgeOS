@@ -517,22 +517,22 @@ pub(crate) async fn execute_ws_method(
         "projectLifecycle/audit/list" => list_project_audit_payload(state, params)
             .await
             .map_err(anyhow::Error::from),
-        "projectLifecycle/validation/save" =>
+        "projectLifecycle/validation/save" => {
             save_project_validation_payload(state, &auth.profile_id, params)
                 .await
-                .map_err(anyhow::Error::from),
-        "projectLifecycle/validation/record" =>
+                .map_err(anyhow::Error::from)
+        }
+        "projectLifecycle/validation/record" => {
             record_project_validation_payload(state, auth, params)
                 .await
-                .map_err(anyhow::Error::from),
-        "projectLifecycle/release/save" =>
-            save_project_release_payload(state, auth, params)
-                .await
-                .map_err(anyhow::Error::from),
-        "projectLifecycle/operations/save" =>
-            save_project_operations_payload(state, auth, params)
-                .await
-                .map_err(anyhow::Error::from),
+                .map_err(anyhow::Error::from)
+        }
+        "projectLifecycle/release/save" => save_project_release_payload(state, auth, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "projectLifecycle/operations/save" => save_project_operations_payload(state, auth, params)
+            .await
+            .map_err(anyhow::Error::from),
         "sessionFilters/save" => save_session_filter_payload(
             state,
             &auth.profile_id,

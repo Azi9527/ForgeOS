@@ -2353,7 +2353,12 @@ async fn saves_session_folders_with_pin_state_and_empty_membership() {
         folders[0].get("lastSessionId").and_then(Value::as_str),
         Some("session-1")
     );
-    assert!(folders[0].get("lastOpenedAt").and_then(Value::as_u64).is_some());
+    assert!(
+        folders[0]
+            .get("lastOpenedAt")
+            .and_then(Value::as_u64)
+            .is_some()
+    );
     assert_eq!(
         folders[0].get("settings"),
         Some(&json!({

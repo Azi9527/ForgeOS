@@ -283,9 +283,7 @@ fn validate_release_transition(value: &Value, existing: Option<&Value>) -> ApiRe
         None => matches!(next_status, "draft" | "awaitingApproval"),
         Some(current) if current == next_status => true,
         Some("draft") => next_status == "awaitingApproval",
-        Some("awaitingApproval") => {
-            next_status == "approved" && next_approvals > current_approvals
-        }
+        Some("awaitingApproval") => next_status == "approved" && next_approvals > current_approvals,
         Some("approved") => next_status == "released" && current_approvals > 0,
         Some("released") => next_status == "rolledBack",
         Some(_) => false,
@@ -308,9 +306,7 @@ fn validate_release_policy(lifecycle: &Value, release: &Value) -> ApiResult<()> 
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let target_id = release
-        .get("targetEnvironmentId")
-        .and_then(Value::as_str);
+    let target_id = release.get("targetEnvironmentId").and_then(Value::as_str);
     let production = target_id.is_some_and(|target_id| {
         lifecycle["operations"]["environments"]
             .as_array()

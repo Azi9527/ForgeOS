@@ -41,10 +41,7 @@ fn project_artifact_root(state: &AppState, profile_id: &str, project_name: &str)
         .join(project_artifact_key(project_name))
 }
 
-pub(crate) async fn artifact_signing_key(
-    state: &AppState,
-    profile_id: &str,
-) -> ApiResult<Vec<u8>> {
+pub(crate) async fn artifact_signing_key(state: &AppState, profile_id: &str) -> ApiResult<Vec<u8>> {
     let profile = resolve_runtime_profile(&state.config, profile_id);
     let key_path = profile.data_dir.join("artifact-signing.key");
     if let Ok(bytes) = tokio_fs::read(&key_path).await
@@ -121,9 +118,8 @@ pub(crate) fn artifact_manifest_signature_is_valid(
         return false;
     };
     let payload = artifact_signature_payload(artifact_id, project_name, version, sha256, size);
-    sign_artifact_manifest(key, &payload).is_ok_and(|expected| {
-        bool::from(expected.as_bytes().ct_eq(signature.as_bytes()))
-    })
+    sign_artifact_manifest(key, &payload)
+        .is_ok_and(|expected| bool::from(expected.as_bytes().ct_eq(signature.as_bytes())))
 }
 
 async fn project_is_managed(
@@ -172,8 +168,8 @@ async fn read_project_artifact_metadata(
     {
         return Err(api_error(StatusCode::BAD_REQUEST, "Invalid artifact id."));
     }
-    let metadata_path = project_artifact_root(state, profile_id, project_name)
-        .join(format!("{artifact_id}.json"));
+    let metadata_path =
+        project_artifact_root(state, profile_id, project_name).join(format!("{artifact_id}.json"));
     let bytes = tokio_fs::read(metadata_path)
         .await
         .map_err(|error| match error.kind() {
@@ -192,17 +188,17 @@ async fn verify_project_artifact(
     project_name: &str,
     artifact_id: &str,
 ) -> ApiResult<(Value, PathBuf)> {
-    let metadata = read_project_artifact_metadata(
-        state,
-        profile_id,
-        project_name,
-        artifact_id,
-    )
-    .await?;
+    let metadata =
+        read_project_artifact_metadata(state, profile_id, project_name, artifact_id).await?;
     let stored_name = metadata
         .get("storedName")
         .and_then(Value::as_str)
-        .ok_or_else(|| api_error(StatusCode::INTERNAL_SERVER_ERROR, "Artifact metadata is invalid."))?;
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Artifact metadata is invalid.",
+            )
+        })?;
     let file_path = project_artifact_root(state, profile_id, project_name).join(stored_name);
     let bytes = tokio_fs::read(&file_path)
         .await
@@ -244,7 +240,10 @@ pub(crate) async fn handle_project_artifacts_api_http(
             .and_then(|value| value.parse::<u64>().ok())
             .is_some_and(|length| length > state.config.max_upload_bytes.saturating_add(65_536))
         {
-            return json_error(StatusCode::PAYLOAD_TOO_LARGE, "Project artifact is too large.");
+            return json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Project artifact is too large.",
+            );
         }
         let mut multipart = match Multipart::from_request(request, &()).await {
             Ok(multipart) => multipart,
@@ -281,7 +280,10 @@ pub(crate) async fn handle_project_artifacts_api_http(
             );
         }
         if file_bytes.len() as u64 > state.config.max_upload_bytes {
-            return json_error(StatusCode::PAYLOAD_TOO_LARGE, "Project artifact is too large.");
+            return json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Project artifact is too large.",
+            );
         }
         match project_is_managed(&state, &auth.profile_id, &project_name).await {
             Ok(true) => {}
@@ -338,11 +340,9 @@ pub(crate) async fn handle_project_artifacts_api_http(
             Ok(bytes) => bytes,
             Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         };
-        if let Err(error) = write_project_artifact_file(
-            &root.join(format!("{artifact_id}.json")),
-            &metadata_bytes,
-        )
-        .await
+        if let Err(error) =
+            write_project_artifact_file(&root.join(format!("{artifact_id}.json")), &metadata_bytes)
+                .await
         {
             let _ = tokio_fs::remove_file(&file_path).await;
             return json_error(error.status, &error.message);
@@ -368,11 +368,16 @@ pub(crate) async fn handle_project_artifacts_api_http(
     let project_name = query_param_value(request.uri().query(), "projectName").unwrap_or_default();
     let artifact_id = query_param_value(request.uri().query(), "artifactId").unwrap_or_default();
     if project_name.is_empty() || artifact_id.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "projectName and artifactId are required.");
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "projectName and artifactId are required.",
+        );
     }
     match (request.method(), route_path) {
         (&Method::GET, "/api/project-artifacts/verify") => {
-            match verify_project_artifact(&state, &auth.profile_id, &project_name, &artifact_id).await {
+            match verify_project_artifact(&state, &auth.profile_id, &project_name, &artifact_id)
+                .await
+            {
                 Ok((metadata, _)) => Json(json!({
                     "ok": true,
                     "artifact": metadata
@@ -382,7 +387,9 @@ pub(crate) async fn handle_project_artifacts_api_http(
             }
         }
         (&Method::GET, "/api/project-artifacts/download") => {
-            match verify_project_artifact(&state, &auth.profile_id, &project_name, &artifact_id).await {
+            match verify_project_artifact(&state, &auth.profile_id, &project_name, &artifact_id)
+                .await
+            {
                 Ok((metadata, file_path)) => match tokio_fs::read(file_path).await {
                     Ok(bytes) => {
                         let mut response = Response::new(Body::from(bytes));

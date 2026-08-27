@@ -1150,7 +1150,10 @@ async fn saturated_websocket_queue_invalidates_connection() {
         .clone()
         .expect("saturation should include an invalidation reason");
     assert!(reason.contains("test-saturation"));
-    assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 #[test]
