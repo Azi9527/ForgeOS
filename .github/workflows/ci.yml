@@ -119,4 +119,4 @@ jobs:
         run: pnpm build:e2e-fake
 
       - name: Run computer input E2E
-        run: pnpm exec playwright test e2e/computer-input.spec.ts e2e/continuous-session.spec.ts --reporter=line
+        run: pnpm exec playwright test e2e/computer-input.spec.ts e2e/continuous-session.spec.ts --reporter=line --workers=1
