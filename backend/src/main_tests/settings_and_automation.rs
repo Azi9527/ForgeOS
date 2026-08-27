@@ -2296,7 +2296,7 @@ async fn saves_session_folders_with_pin_state_and_empty_membership() {
     fs::create_dir_all(&codex_home).unwrap();
     init_test_git_repo(&workspace);
 
-    let state = test_state(workspace.clone(), vec![workspace], codex_home);
+    let state = test_state(workspace.clone(), vec![workspace.clone()], codex_home);
 
     update_session_organization_payload(
         &state,

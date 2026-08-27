@@ -13,10 +13,14 @@ test.beforeEach(async ({ baseURL, context }) => {
 });
 
 async function login(page: import("@playwright/test").Page) {
-  await page.goto("/?sessionNew=1");
+  await page.goto("/");
   await page.getByTestId("login-password").fill(process.env.CODEX_WEBUI_E2E_PASSWORD ?? "test");
   await page.getByTestId("login-submit").click();
   await expect(page.getByTestId("workspace-shell")).toBeVisible();
+  const appUrl = new URL(page.url());
+  appUrl.search = "?sessionNew=1";
+  await page.goto(appUrl.toString());
+  await expect(page.getByTestId("composer-input")).toBeVisible();
 }
 
 test("keeps a background Codex conversation across disconnect and reload", async ({ context, page }) => {
