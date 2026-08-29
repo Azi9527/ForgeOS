@@ -130,6 +130,15 @@ fn artifact_multipart_body(
     )
 }
 
+fn legacy_artifact_multipart_body(boundary: &str, project_name: &str) -> String {
+    format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"projectName\"\r\n\r\n{project_name}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"version\"\r\n\r\n0.3.0-rc.1\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"forgeos.zip\"\r\nContent-Type: application/zip\r\n\r\nrelease-bytes\r\n\
+         --{boundary}--\r\n"
+    )
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn artifact_http_upload_verifies_and_rejects_oversized_metadata() {
     let root = std::env::temp_dir().join(format!("forgeos-artifact-http-{}", Uuid::new_v4()));
@@ -225,6 +234,46 @@ async fn artifact_http_upload_verifies_and_rejects_oversized_metadata() {
     )
     .await;
     assert_eq!(oversized_response.status(), StatusCode::BAD_REQUEST);
+
+    let legacy_request = Request::builder()
+        .method(Method::POST)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(legacy_artifact_multipart_body(
+            boundary,
+            "Artifact HTTP Test",
+        )))
+        .unwrap();
+    let legacy_response = handle_project_artifacts_api_http(
+        state.clone(),
+        legacy_request,
+        AuthContext {
+            role: UserRole::Admin,
+            profile_id: "default".to_string(),
+        },
+        "/api/project-artifacts",
+    )
+    .await;
+    assert_eq!(legacy_response.status(), StatusCode::CONFLICT);
+
+    let legacy_verify_request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/project-artifacts/verify?projectName=Artifact%20HTTP%20Test&artifactId=legacy")
+        .body(Body::empty())
+        .unwrap();
+    let legacy_verify_response = handle_project_artifacts_api_http(
+        state.clone(),
+        legacy_verify_request,
+        AuthContext {
+            role: UserRole::Viewer,
+            profile_id: "default".to_string(),
+        },
+        "/api/project-artifacts/verify",
+    )
+    .await;
+    assert_eq!(legacy_verify_response.status(), StatusCode::CONFLICT);
 
     let metadata_files = std::fs::read_dir(project_artifact_root(&state, "default", project_id))
         .unwrap()

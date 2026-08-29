@@ -105,6 +105,18 @@ fn migration_preview_is_read_only_and_keeps_legacy_folder_identity() {
 }
 
 #[test]
+fn project_import_commit_rejects_an_incomplete_conversation_discovery() {
+    let preview = json!({
+        "candidates": [],
+        "warnings": ["Conversation discovery was capped at 1000 records."]
+    });
+
+    let error = require_complete_project_import_preview(&preview).unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert!(error.message.contains("PROJECT_IMPORT_INCOMPLETE"));
+}
+
+#[test]
 fn deterministic_import_id_survives_retries() {
     assert_eq!(
         stable_project_id("default", "folder:aps"),

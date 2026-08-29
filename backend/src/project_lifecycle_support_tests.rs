@@ -15,6 +15,30 @@ fn admin_auth() -> AuthContext {
 }
 
 #[test]
+fn lifecycle_addressing_rejects_legacy_project_names_with_upgrade_guidance() {
+    assert_eq!(
+        require_lifecycle_project_id(&json!({ "projectId": "prj_forgeos" })).unwrap(),
+        "prj_forgeos"
+    );
+    let error = require_lifecycle_project_id(&json!({ "projectName": "ForgeOS" })).unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert!(error.message.starts_with("UPGRADE_REQUIRED:"));
+    assert_eq!(
+        require_lifecycle_project_id(&json!({})).unwrap_err().status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        require_lifecycle_project_id(&json!({
+            "projectId": "invalid",
+            "projectName": "ForgeOS"
+        }))
+        .unwrap_err()
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[test]
 fn lifecycle_default_has_bounded_empty_sections() {
     assert_eq!(
         lifecycle_default("prj_forgeos", "ForgeOS"),
@@ -38,6 +62,7 @@ fn viewer_lifecycle_redaction_preserves_evidence_without_sensitive_details() {
             "checks": [{ "id": "build", "command": "secret-build" }],
             "runs": [{
                 "operator": { "profileId": "owner-a", "role": "owner" },
+                "cleanupAcknowledgedBy": { "profileId": "approver-a", "role": "owner" },
                 "checks": [{ "command": "secret-build", "output": "secret-output" }]
             }]
         },
@@ -73,6 +98,7 @@ fn viewer_lifecycle_redaction_preserves_evidence_without_sensitive_details() {
                 "checks": [{ "id": "build", "command": "" }],
                 "runs": [{
                     "operator": { "profileId": "redacted", "role": "owner" },
+                    "cleanupAcknowledgedBy": { "profileId": "redacted", "role": "owner" },
                     "checks": [{ "command": "", "output": "" }]
                 }]
             },

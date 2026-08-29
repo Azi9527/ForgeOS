@@ -1084,6 +1084,20 @@ pub(crate) async fn preview_project_import_v2_payload(
     }))
 }
 
+fn require_complete_project_import_preview(preview: &Value) -> ApiResult<()> {
+    if preview
+        .get("warnings")
+        .and_then(Value::as_array)
+        .is_some_and(|warnings| !warnings.is_empty())
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "PROJECT_IMPORT_INCOMPLETE: Conversation discovery was incomplete. Resolve the preview warnings and refresh before importing projects.",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn commit_project_import_v2_payload(
     state: &AppState,
     profile_id: &str,
@@ -1101,6 +1115,7 @@ pub(crate) async fn commit_project_import_v2_payload(
         .filter(|keys| !keys.is_empty())
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "candidateKeys is required."))?;
     let preview = preview_project_import_v2_payload(state, profile_id).await?;
+    require_complete_project_import_preview(&preview)?;
     let selected = preview
         .get("candidates")
         .and_then(Value::as_array)

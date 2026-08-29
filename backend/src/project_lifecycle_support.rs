@@ -72,13 +72,25 @@ fn governance_u64(lifecycle: &Value, section: &str, field: &str, fallback: u64) 
 }
 
 pub(crate) fn require_lifecycle_project_id(params: &Value) -> ApiResult<String> {
-    params
-        .get("projectId")
+    if let Some(raw_project_id) = params.get("projectId") {
+        return raw_project_id
+            .as_str()
+            .map(str::trim)
+            .filter(|value| value.starts_with("prj_") && value.len() > 4)
+            .map(str::to_string)
+            .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "projectId is invalid"));
+    }
+    if params
+        .get("projectName")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| value.starts_with("prj_") && value.len() > 4)
-        .map(str::to_string)
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "projectId is required"))
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "UPGRADE_REQUIRED: projectName lifecycle addressing is no longer supported. Refresh Project Registry V2 and retry with projectId.",
+        ));
+    }
+    Err(api_error(StatusCode::BAD_REQUEST, "projectId is required"))
 }
 
 fn bounded_string(value: Option<&Value>, max_bytes: usize) -> String {
@@ -783,6 +795,9 @@ pub(crate) fn redact_project_lifecycle_for_viewer(lifecycle: &mut Value) {
         .flatten()
     {
         redact_lifecycle_operator(&mut run["operator"]);
+        if let Some(operator) = run.get_mut("cleanupAcknowledgedBy") {
+            redact_lifecycle_operator(operator);
+        }
         for check in run["checks"].as_array_mut().into_iter().flatten() {
             check["command"] = json!("");
             check["output"] = json!("");

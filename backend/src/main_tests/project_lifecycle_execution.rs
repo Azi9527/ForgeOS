@@ -343,3 +343,279 @@ async fn gateway_executes_deployments_and_health_checks_with_server_evidence() {
 
     fs::remove_dir_all(sandbox).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn artifact_release_deployment_chain_enforces_project_and_environment_authority() {
+    let sandbox = std::env::temp_dir().join(format!("fac-{}", Uuid::new_v4().simple()));
+    let project_root = sandbox.join("a");
+    let other_project_root = sandbox.join("b");
+    let codex_home = sandbox.join("c");
+    fs::create_dir_all(&project_root).unwrap();
+    fs::create_dir_all(&other_project_root).unwrap();
+    fs::create_dir_all(&codex_home).unwrap();
+    let state = test_state(sandbox.clone(), vec![sandbox.clone()], codex_home);
+    let profile_data_dir = resolve_runtime_profile(&state.config, "default").data_dir;
+    fs::create_dir_all(&profile_data_dir).unwrap();
+    fs::write(profile_data_dir.join("artifact-signing.key"), [7_u8; 32]).unwrap();
+    let project_id = "prj_artifact_chain";
+    let other_project_id = "prj_artifact_chain_other";
+    with_ui_state_write(&state, "default", |ui_state| {
+        ui_state["projectRegistry"]["projectsById"][project_id] = json!({
+            "projectId": project_id,
+            "name": "Artifact Chain",
+            "rootPath": project_root.display().to_string(),
+            "status": "active"
+        });
+        ui_state["projectRegistry"]["projectsById"][other_project_id] = json!({
+            "projectId": other_project_id,
+            "name": "Other Artifact Chain",
+            "rootPath": other_project_root.display().to_string(),
+            "status": "active"
+        });
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let auth = AuthContext {
+        role: UserRole::Admin,
+        profile_id: "default".to_string(),
+    };
+    let configured = save_project_operations_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": project_id,
+            "environments": [{
+                "id": "staging",
+                "name": "Staging",
+                "kind": "staging",
+                "adapter": "localCommand",
+                "deployCommand": local_script("artifact-chain-deployed")
+            }]
+        }),
+    )
+    .await
+    .unwrap();
+
+    let boundary = "forgeos-artifact-chain-boundary";
+    let upload_body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"projectId\"\r\n\r\n{project_id}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"version\"\r\n\r\n1.0.0\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"sourceCommit\"\r\n\r\ndeadbeef\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"forgeos.zip\"\r\nContent-Type: application/zip\r\n\r\nrelease-bytes\r\n\
+         --{boundary}--\r\n"
+    );
+    let upload_request = Request::builder()
+        .method(Method::POST)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(upload_body))
+        .unwrap();
+    let upload_response = handle_project_artifacts_api_http(
+        state.clone(),
+        upload_request,
+        auth.clone(),
+        "/api/project-artifacts",
+    )
+    .await;
+    let upload_status = upload_response.status();
+    let upload_body = to_bytes(upload_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        upload_status,
+        StatusCode::CREATED,
+        "artifact upload failed: {}",
+        String::from_utf8_lossy(&upload_body)
+    );
+    let upload: Value = serde_json::from_slice(&upload_body).unwrap();
+    let artifact = upload["artifact"].clone();
+    let artifact_id = artifact["id"].as_str().unwrap();
+
+    let wrong_project_verify_request = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/project-artifacts/verify?projectId={other_project_id}&artifactId={artifact_id}"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let wrong_project_verify = handle_project_artifacts_api_http(
+        state.clone(),
+        wrong_project_verify_request,
+        auth.clone(),
+        "/api/project-artifacts/verify",
+    )
+    .await;
+    assert_eq!(wrong_project_verify.status(), StatusCode::NOT_FOUND);
+
+    let cross_project_release = save_project_release_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": other_project_id,
+            "artifacts": [artifact.clone()],
+            "releases": [{
+                "id": "release-cross-project",
+                "version": "1.0.0",
+                "artifactIds": [artifact_id],
+                "status": "released",
+                "targetEnvironmentId": "staging",
+                "approvals": [{}]
+            }]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(cross_project_release.status, StatusCode::NOT_FOUND);
+
+    let draft_release = json!({
+        "id": "release-1",
+        "version": "1.0.0",
+        "artifactIds": [artifact_id],
+        "status": "draft",
+        "targetEnvironmentId": "staging",
+        "approvals": []
+    });
+    let draft = save_project_release_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": project_id,
+            "revision": configured["revision"],
+            "artifacts": [artifact.clone()],
+            "releases": [draft_release]
+        }),
+    )
+    .await
+    .unwrap();
+    let mut awaiting_release = draft["release"]["releases"][0].clone();
+    awaiting_release["status"] = json!("awaitingApproval");
+    let awaiting = save_project_release_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": project_id,
+            "revision": draft["revision"],
+            "artifacts": draft["release"]["artifacts"].clone(),
+            "releases": [awaiting_release]
+        }),
+    )
+    .await
+    .unwrap();
+    let mut approved_release = awaiting["release"]["releases"][0].clone();
+    approved_release["status"] = json!("approved");
+    approved_release["approvals"] = json!([{}]);
+    let approved = save_project_release_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": project_id,
+            "revision": awaiting["revision"],
+            "artifacts": awaiting["release"]["artifacts"].clone(),
+            "releases": [approved_release]
+        }),
+    )
+    .await
+    .unwrap();
+    let mut released_release = approved["release"]["releases"][0].clone();
+    released_release["status"] = json!("released");
+    released_release["releasedAt"] = json!(now_unix_ms());
+    let released = save_project_release_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": project_id,
+            "revision": approved["revision"],
+            "artifacts": approved["release"]["artifacts"].clone(),
+            "releases": [released_release]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        released["release"]["releases"][0]["status"],
+        json!("released")
+    );
+    assert_eq!(
+        released["release"]["artifacts"][0]["signatureVerified"],
+        json!(true)
+    );
+
+    let wrong_environment = run_project_deployment_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": project_id,
+            "releaseId": "release-1",
+            "environmentId": "production",
+            "expectedRevision": released["revision"]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(wrong_environment.status, StatusCode::CONFLICT);
+
+    let other_lifecycle =
+        get_project_lifecycle_payload(&state, "default", json!({ "projectId": other_project_id }))
+            .await
+            .unwrap();
+    let cross_project_deployment = run_project_deployment_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": other_project_id,
+            "releaseId": "release-1",
+            "environmentId": "staging",
+            "expectedRevision": other_lifecycle["revision"]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(cross_project_deployment.status, StatusCode::NOT_FOUND);
+
+    let deployed = run_project_deployment_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": project_id,
+            "releaseId": "release-1",
+            "environmentId": "staging",
+            "expectedRevision": released["revision"]
+        }),
+    )
+    .await
+    .unwrap();
+    let deployment = &deployed["operations"]["deployments"][0];
+    assert_eq!(deployment["releaseId"], json!("release-1"));
+    assert_eq!(deployment["environmentId"], json!("staging"));
+    assert_eq!(deployment["status"], json!("succeeded"));
+    assert_eq!(deployment["logs"], json!("artifact-chain-deployed"));
+
+    let stored_name = artifact["storedName"].as_str().unwrap();
+    tokio_fs::write(
+        project_artifact_root(&state, "default", project_id).join(stored_name),
+        b"tampered-release-bytes",
+    )
+    .await
+    .unwrap();
+    let tampered_verify_request = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/project-artifacts/verify?projectId={project_id}&artifactId={artifact_id}"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let tampered_verify = handle_project_artifacts_api_http(
+        state,
+        tampered_verify_request,
+        auth,
+        "/api/project-artifacts/verify",
+    )
+    .await;
+    assert_eq!(tampered_verify.status(), StatusCode::CONFLICT);
+
+    fs::remove_dir_all(sandbox).unwrap();
+}

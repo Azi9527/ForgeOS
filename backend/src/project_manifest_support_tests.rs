@@ -204,6 +204,60 @@ async fn manifest_write_failure_does_not_pollute_the_registry_value() {
     std::fs::remove_dir_all(root).expect("remove test project root");
 }
 
+#[tokio::test]
+async fn ui_state_persistence_failure_rolls_back_every_project_manifest() {
+    let parent = test_root("manifest-multi-project-rollback");
+    let first = parent.join("first");
+    let second = parent.join("second");
+    std::fs::create_dir_all(first.join(".forgeos")).expect("create first metadata directory");
+    std::fs::create_dir_all(second.join(".forgeos")).expect("create second metadata directory");
+    let first_manifest = first.join(".forgeos").join("project.json");
+    let second_manifest = second.join(".forgeos").join("project.json");
+    let first_before = "{\"projectId\":\"prj_first_before\"}\n";
+    let second_before = "{\"projectId\":\"prj_second_before\"}\n";
+    std::fs::write(&first_manifest, first_before).expect("write first original manifest");
+    std::fs::write(&second_manifest, second_before).expect("write second original manifest");
+    let roots = allowed_roots(&parent);
+    let updates = vec![
+        project_manifest_file_update(&project(&first, "prj_first", "First"), &roots)
+            .expect("first manifest update"),
+        project_manifest_file_update(&project(&second, "prj_second", "Second"), &roots)
+            .expect("second manifest update"),
+    ];
+    let original = json!({ "projectRegistry": { "projectsById": {} } });
+    let mut current = original.clone();
+    let next = json!({
+        "projectRegistry": {
+            "projectsById": {
+                "prj_first": project(&first, "prj_first", "First"),
+                "prj_second": project(&second, "prj_second", "Second")
+            }
+        }
+    });
+
+    let result = commit_value_and_text_file_updates(&mut current, next, updates, |_| async {
+        Err(anyhow!("injected UI-state persistence failure"))
+    })
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("injected UI-state persistence failure")
+    );
+    assert_eq!(current, original);
+    assert_eq!(
+        std::fs::read_to_string(first_manifest).expect("read rolled-back first manifest"),
+        first_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(second_manifest).expect("read rolled-back second manifest"),
+        second_before
+    );
+    std::fs::remove_dir_all(parent).expect("remove test project root");
+}
+
 #[test]
 fn ordinary_editor_detection_covers_missing_legacy_and_corrupt_manifests() {
     assert!(is_project_manifest_path(Path::new(

@@ -9,6 +9,7 @@ const ARTIFACT_SIGNATURE_CONTEXT: &str = "forgeos-project-artifact-v2";
 const LEGACY_ARTIFACT_SIGNATURE_CONTEXT: &str = "forgeos-project-artifact-v1";
 const ARTIFACT_METADATA_MAX_BYTES: u64 = 64 * 1024;
 const ARTIFACT_PROJECT_ID_MAX_BYTES: usize = 128;
+const ARTIFACT_LEGACY_PROJECT_NAME_MAX_BYTES: usize = 256;
 const ARTIFACT_VERSION_MAX_BYTES: usize = 128;
 const ARTIFACT_SOURCE_COMMIT_MAX_BYTES: usize = 256;
 const ARTIFACT_ORIGINAL_NAME_MAX_BYTES: usize = 255;
@@ -516,6 +517,7 @@ pub(crate) async fn handle_project_artifacts_api_http(
             Err(_) => return json_error(StatusCode::BAD_REQUEST, "Invalid artifact upload."),
         };
         let mut project_id = String::new();
+        let mut legacy_project_name_seen = false;
         let mut version = String::new();
         let mut source_commit = String::new();
         let mut original_name = String::new();
@@ -538,7 +540,7 @@ pub(crate) async fn handle_project_artifacts_api_http(
                 }
             } else if matches!(
                 field_name.as_str(),
-                "projectId" | "version" | "sourceCommit"
+                "projectId" | "projectName" | "version" | "sourceCommit"
             ) {
                 let bytes = match field.bytes().await {
                     Ok(bytes) => bytes,
@@ -551,6 +553,12 @@ pub(crate) async fn handle_project_artifacts_api_http(
                         bounded_artifact_text(&bytes, "projectId", ARTIFACT_PROJECT_ID_MAX_BYTES)
                             .map(|value| project_id = value)
                     }
+                    "projectName" => bounded_artifact_text(
+                        &bytes,
+                        "projectName",
+                        ARTIFACT_LEGACY_PROJECT_NAME_MAX_BYTES,
+                    )
+                    .map(|value| legacy_project_name_seen = !value.is_empty()),
                     "version" => {
                         bounded_artifact_text(&bytes, "version", ARTIFACT_VERSION_MAX_BYTES)
                             .map(|value| version = value)
@@ -567,6 +575,12 @@ pub(crate) async fn handle_project_artifacts_api_http(
                     return json_error(error.status, &error.message);
                 }
             }
+        }
+        if project_id.is_empty() && legacy_project_name_seen {
+            return json_error(
+                StatusCode::CONFLICT,
+                "UPGRADE_REQUIRED: projectName artifact addressing is no longer supported. Refresh Project Registry V2 and retry with projectId.",
+            );
         }
         if project_id.is_empty() || version.is_empty() || file_bytes.is_empty() {
             return json_error(
@@ -681,6 +695,15 @@ pub(crate) async fn handle_project_artifacts_api_http(
     }
 
     let project_id = query_param_value(request.uri().query(), "projectId").unwrap_or_default();
+    if project_id.is_empty()
+        && query_param_value(request.uri().query(), "projectName")
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return json_error(
+            StatusCode::CONFLICT,
+            "UPGRADE_REQUIRED: projectName artifact addressing is no longer supported. Refresh Project Registry V2 and retry with projectId.",
+        );
+    }
     let artifact_id = query_param_value(request.uri().query(), "artifactId").unwrap_or_default();
     if project_id.is_empty() || artifact_id.is_empty() {
         return json_error(
