@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import WebSocket from "ws";
 
 const DEV_BYPASS_COOKIE = {
   name: "dev_bypass_waf",
@@ -28,47 +29,55 @@ async function wsRequest<T>(
   params: Record<string, unknown>,
   timeoutMs = 15_000
 ) {
-  return page.evaluate(
-    ({ method, params, timeoutMs }) =>
-      new Promise<WsResponse<T>>((resolve, reject) => {
-        const url = new URL(window.location.href);
-        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-        url.pathname = `${url.pathname.replace(/\/$/u, "")}/ws`;
-        url.search = "";
-        const id = `project-platform-${Date.now()}`;
-        const socket = new WebSocket(url.toString());
-        const timeout = window.setTimeout(() => reject(new Error(`Timed out waiting for ${method}`)), timeoutMs);
-        socket.addEventListener("open", () => socket.send(JSON.stringify({ kind: "request", id, method, params })));
-        socket.addEventListener("message", (event) => {
-          if (typeof event.data !== "string") return;
-          const payload = JSON.parse(event.data) as WsResponse<T>;
-          if (payload.kind !== "response" || payload.id !== id) return;
-          window.clearTimeout(timeout);
-          socket.close();
-          resolve(payload);
-        });
-        socket.addEventListener("error", () => {
-          window.clearTimeout(timeout);
-          reject(new Error(`WebSocket ${method} request failed.`));
-        });
-      }),
-    { method, params, timeoutMs }
-  );
-}
+  const pageUrl = page.url();
+  const pageOrigin = new URL(pageUrl).origin;
+  const cookieHeader = (await page.context().cookies(pageUrl))
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
+    .join("; ");
+  const url = new URL(pageUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = `${url.pathname.replace(/\/$/u, "")}/ws`;
+  url.search = "";
+  const id = `project-platform-${Date.now()}`;
 
-async function wsRequestFromFreshPage<T>(
-  page: import("@playwright/test").Page,
-  method: string,
-  params: Record<string, unknown>,
-  timeoutMs = 15_000
-) {
-  const requestPage = await page.context().newPage();
-  try {
-    await requestPage.goto("/");
-    return await wsRequest<T>(requestPage, method, params, timeoutMs);
-  } finally {
-    await requestPage.close();
-  }
+  return new Promise<WsResponse<T>>((resolve, reject) => {
+    const socket = new WebSocket(url, {
+      headers: { cookie: cookieHeader },
+      origin: pageOrigin
+    });
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.terminate();
+      reject(new Error(`Timed out waiting for ${method}`));
+    }, timeoutMs);
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.terminate();
+      reject(error);
+    };
+
+    socket.once("open", () => socket.send(JSON.stringify({ kind: "request", id, method, params })));
+    socket.on("message", (data) => {
+      let payload: WsResponse<T>;
+      try {
+        payload = JSON.parse(data.toString()) as WsResponse<T>;
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      if (payload.kind !== "response" || payload.id !== id || settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.close();
+      resolve(payload);
+    });
+    socket.once("error", (error) => fail(new Error(`WebSocket ${method} request failed: ${error.message}`)));
+    socket.once("close", () => fail(new Error(`WebSocket ${method} closed before returning a response.`)));
+  });
 }
 
 function shellQuote(value: string) {
@@ -141,7 +150,7 @@ test("opens a project folder into release and operations workspaces", async ({ p
   } finally {
     try {
       if (projectId) {
-        const removed = await wsRequestFromFreshPage(page, "project/archive", {
+        const removed = await wsRequest(page, "project/archive", {
           projectId
         });
         expect(removed.ok, removed.error).toBeTruthy();
@@ -231,7 +240,7 @@ test("runs the real ForgeOS repository build through gateway validation and reco
   } finally {
     try {
       if (projectId && registeredForPilot) {
-        const archived = await wsRequestFromFreshPage(page, "project/archive", { projectId });
+        const archived = await wsRequest(page, "project/archive", { projectId });
         expect(archived.ok, archived.error).toBeTruthy();
       }
     } finally {
