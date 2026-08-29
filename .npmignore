@@ -1,0 +1,25 @@
+# Local build and test outputs are never distribution inputs.
+backend/target/
+node_modules/
+artifacts/
+playwright-report/
+test-results/
+.data/
+.svelte-kit/
+
+# Local operator state and temporary release staging.
+*.log
+*.pid
+*.tmp
+gateway-release-state.json*
+
+# Credentials, trust material, and persisted business data never belong in an
+# operator package. `.env.example` is explicitly allowed by package.json.
+.env
+.env.*
+!.env.example
+**/*.key
+**/*.pem
+**/auth.json
+**/audit-log.jsonl*
+**/ui-state.json*

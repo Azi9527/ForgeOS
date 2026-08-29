@@ -1,0 +1,8 @@
+target/
+data/
+.env
+.env.*
+*.key
+*.pem
+audit-log.jsonl*
+ui-state.json*

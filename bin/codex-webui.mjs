@@ -14,8 +14,10 @@ import YAML from "yaml";
 import {
   installGatewayBundle,
   readGatewayReleaseState,
+  restartGatewayWithReleaseRecovery,
   resolveInstalledGatewayRelease,
   rollbackGatewayRelease,
+  waitForGatewayReadiness,
   writeGatewayReleaseState
 } from "../scripts/gateway-release.mjs";
 
@@ -24,10 +26,41 @@ const stateDir = path.join(os.homedir(), ".codex", "codex-webui");
 const configPath = path.join(os.homedir(), ".codex", "codex-webui.yml");
 const pidPath = path.join(stateDir, "server.pid");
 const serverMetaPath = path.join(stateDir, "server.json");
+const dataMaintenanceLockPath = path.join(stateDir, "gateway-data-maintenance.lock");
 const logPath = path.join(stateDir, "server.log");
 const tunnelPidPath = path.join(stateDir, "tunnel.pid");
 const tunnelLogPath = path.join(stateDir, "tunnel.log");
 const tunnelMetaPath = path.join(stateDir, "tunnel.json");
+const GATEWAY_READINESS_TIMEOUT_MS = 30_000;
+
+async function acquireGatewayStartLock() {
+  await fs.mkdir(stateDir, { recursive: true });
+  const nonce = randomBytes(24).toString("base64url");
+  let handle;
+  try {
+    handle = await fs.open(dataMaintenanceLockPath, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify({ pid: process.pid, nonce, operation: "gateway-start" })}\n`);
+    await handle.sync();
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (error?.code === "EEXIST") {
+      throw new Error("Gateway data backup or restore is active; refusing to start the gateway.");
+    }
+    throw error;
+  }
+  await handle.close();
+  return async () => {
+    let current;
+    try {
+      current = JSON.parse(await fs.readFile(dataMaintenanceLockPath, "utf8"));
+    } catch {
+      return;
+    }
+    if (current?.nonce === nonce) {
+      await fs.rm(dataMaintenanceLockPath, { force: true });
+    }
+  };
+}
 
 function runtimeErrorLogPath(config) {
   return path.join(config.dataDir, "logs", "runtime-errors.jsonl");
@@ -518,6 +551,29 @@ async function verifyServerInstance(config, meta) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function probeGatewayReadiness(config, instanceToken) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
+  try {
+    const response = await fetch(`${buildBaseUrl(config)}/readyz`, {
+      headers: {
+        "x-codex-webui-instance-token": instanceToken
+      },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      return false;
+    }
+    const payload = await response.json();
+    if (payload?.status !== "ready") {
+      return false;
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+  return verifyServerInstance(config, { instanceToken });
 }
 
 async function prepareRestartHandoff(config, meta) {
@@ -1122,10 +1178,10 @@ async function resolveBackendLaunch(config) {
     }
   }
 
-  throw new Error("Could not find a runnable gateway. Install a prebuilt bundle with `codex-webui gateway install <directory>` or set backendBinaryPath explicitly.");
+  throw new Error("Could not find a runnable ForgeOS gateway. Install a prebuilt bundle with `forgeos gateway install <directory>` or set backendBinaryPath explicitly.");
 }
 
-async function startServer(config) {
+async function startServerUnlocked(config) {
   await ensureStateDir();
   const current = await readServerStatus(config);
   if (current.verified) {
@@ -1133,7 +1189,7 @@ async function startServer(config) {
   }
   if (current.running) {
     throw new Error(
-      `Refusing to reuse PID ${current.pid}: the process is running but does not match this codex-webui instance. Remove ${pidPath} and ${serverMetaPath} only if you have verified it is stale.`
+      `Refusing to reuse PID ${current.pid}: the process is running but does not match this ForgeOS instance. Remove ${pidPath} and ${serverMetaPath} only if you have verified it is stale.`
     );
   }
 
@@ -1196,7 +1252,45 @@ async function startServer(config) {
     url: buildUrl(config)
   });
   await logHandle.close();
+  try {
+    await waitForGatewayReadiness({
+      pid: child.pid,
+      probe: () => probeGatewayReadiness(config, instanceToken),
+      isProcessRunning: isRunning,
+      timeoutMs: GATEWAY_READINESS_TIMEOUT_MS
+    });
+  } catch (error) {
+    let stopped = !isRunning(child.pid);
+    let cleanupError = null;
+    if (!stopped) {
+      try {
+        process.kill(child.pid, "SIGTERM");
+        stopped = await waitForProcessExit(child.pid, 10_000);
+        if (!stopped) {
+          cleanupError = `Gateway process ${child.pid} did not stop after readiness failure.`;
+        }
+      } catch (stopError) {
+        cleanupError = `Gateway process ${child.pid} could not be stopped: ${stopError instanceof Error ? stopError.message : String(stopError)}`;
+      }
+    }
+    if (stopped) {
+      await clearServerStateFiles();
+    }
+    const cleanupDetails = cleanupError ? ` ${cleanupError}` : "";
+    throw new Error(
+      `Gateway process ${child.pid} failed readiness: ${error instanceof Error ? error.message : String(error)}${cleanupDetails}`
+    );
+  }
   return { pid: child.pid, alreadyRunning: false };
+}
+
+async function startServer(config) {
+  const releaseStartLock = await acquireGatewayStartLock();
+  try {
+    return await startServerUnlocked(config);
+  } finally {
+    await releaseStartLock();
+  }
 }
 
 async function stopServer(config) {
@@ -1211,7 +1305,7 @@ async function stopServer(config) {
   process.kill(status.pid, "SIGTERM");
   const exited = await waitForProcessExit(status.pid, 10000);
   if (!exited) {
-    throw new Error(`Timed out waiting for codex-webui PID ${status.pid} to stop.`);
+    throw new Error(`Timed out waiting for ForgeOS PID ${status.pid} to stop.`);
   }
   await clearServerStateFiles();
   return { stopped: true, pid: status.pid };
@@ -1220,7 +1314,7 @@ async function stopServer(config) {
 async function restartServer(config) {
   const status = await readServerStatus(config);
   if (status.pid && status.running && !status.verified) {
-    throw new Error(`Refusing to restart: PID ${status.pid} could not be verified as this codex-webui instance.`);
+    throw new Error(`Refusing to restart: PID ${status.pid} could not be verified as this ForgeOS instance.`);
   }
   const handoff = status.verified ? await prepareRestartHandoff(config, status.meta) : { prepared: false, error: "No verified running gateway." };
   if (status.verified && !handoff.prepared) {
@@ -1228,7 +1322,7 @@ async function restartServer(config) {
   }
   const stopResult = await stopServer(config);
   if (stopResult.unsafe) {
-    throw new Error(`Refusing to restart: PID ${stopResult.pid} could not be verified as this codex-webui instance.`);
+    throw new Error(`Refusing to restart: PID ${stopResult.pid} could not be verified as this ForgeOS instance.`);
   }
   const started = await startServer(config);
   return { ...started, handoffPrepared: handoff.prepared };
@@ -1236,20 +1330,18 @@ async function restartServer(config) {
 
 function printGatewayUsage() {
   console.log("Gateway release commands:");
-  console.log("  codex-webui gateway status");
-  console.log("  codex-webui gateway install <extracted-bundle-directory>");
-  console.log("  codex-webui gateway restart");
-  console.log("  codex-webui gateway rollback");
+  console.log("  forgeos gateway status");
+  console.log("  forgeos gateway install <extracted-bundle-directory>");
+  console.log("  forgeos gateway restart");
+  console.log("  forgeos gateway rollback");
 }
 
 async function restartAfterGatewaySwitch(config, restoreState) {
-  try {
-    return await restartServer(config);
-  } catch (error) {
-    await writeGatewayReleaseState(stateDir, restoreState);
-    await startServer(config);
-    throw new Error(`Gateway switch failed and the previous release was restored: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  return restartGatewayWithReleaseRecovery({
+    restartGateway: () => restartServer(config),
+    restoreReleaseState: () => writeGatewayReleaseState(stateDir, restoreState),
+    startRestoredGateway: () => startServer(config)
+  });
 }
 
 async function runGatewayCommand(config, argv) {
@@ -1298,10 +1390,10 @@ async function runGatewayCommand(config, argv) {
 
 function printTunnelUsage() {
   console.log("Tunnel commands:");
-  console.log("  codex-webui tunnel start [--provider auto|cloudflared|ngrok] [--foreground] [--hostname host] [--name tunnel] [--overwrite-dns] [--log-level level] [--arg value] [--yes] [--json]");
-  console.log("  codex-webui tunnel status [--json]");
-  console.log("  codex-webui tunnel stop");
-  console.log("  codex-webui tunnel logs [--lines 80] [--json]");
+  console.log("  forgeos tunnel start [--provider auto|cloudflared|ngrok] [--foreground] [--hostname host] [--name tunnel] [--overwrite-dns] [--log-level level] [--arg value] [--yes] [--json]");
+  console.log("  forgeos tunnel status [--json]");
+  console.log("  forgeos tunnel stop");
+  console.log("  forgeos tunnel logs [--lines 80] [--json]");
 }
 
 async function runTunnel(config, argv) {
@@ -1351,12 +1443,12 @@ async function runTunnel(config, argv) {
       console.log(`Public workspace: waiting for public URL, check ${status.logPath}`);
     }
     console.log(`Tunnel log: ${status.logPath}`);
-    console.log("Use `codex-webui tunnel status` or `codex-webui tunnel stop` to manage it.");
+    console.log("Use `forgeos tunnel status` or `forgeos tunnel stop` to manage it.");
   }
 }
 
 function printUsage(config, pid, alreadyRunning) {
-  console.log(alreadyRunning ? "codex-webui is already running." : "codex-webui started in the background.");
+  console.log(alreadyRunning ? "ForgeOS is already running." : "ForgeOS started in the background.");
   console.log(`URL: ${buildUrl(config)}`);
   console.log(`PID: ${pid}`);
   console.log(`Config: ${configPath}`);
@@ -1368,21 +1460,21 @@ function printUsage(config, pid, alreadyRunning) {
 
 function printCommandHelp() {
   console.log("Commands:");
-  console.log("  codex-webui config   Re-run the interactive setup");
-  console.log("  codex-webui status   Show the background server state");
-  console.log("  codex-webui restart  Restart the background server with Codex session handoff when available");
-  console.log("  codex-webui stop     Stop the background server");
-  console.log("  codex-webui gateway  Install, restart, inspect, or roll back a prebuilt gateway release");
-  console.log("  codex-webui tunnel start   Start a cloudflared/ngrok tunnel");
-  console.log("  codex-webui tunnel status  Show the current tunnel state");
-  console.log("  codex-webui tunnel stop    Stop the current tunnel");
-  console.log("  codex-webui tunnel logs    Print recent tunnel logs");
+  console.log("  forgeos config   Re-run the interactive setup");
+  console.log("  forgeos status   Show the background server state");
+  console.log("  forgeos restart  Restart the background server with Codex session handoff when available");
+  console.log("  forgeos stop     Stop the background server");
+  console.log("  forgeos gateway  Install, restart, inspect, or roll back a prebuilt gateway release");
+  console.log("  forgeos tunnel start   Start a cloudflared/ngrok tunnel");
+  console.log("  forgeos tunnel status  Show the current tunnel state");
+  console.log("  forgeos tunnel stop    Stop the current tunnel");
+  console.log("  forgeos tunnel logs    Print recent tunnel logs");
   console.log("");
   console.log("Options:");
   console.log("  --hcaptcha-site-key <key>      Enable hCaptcha on the login screen with this site key");
   console.log("  --hcaptcha-secret-key <secret> Enable hCaptcha verification with this secret");
   console.log("  --disable-hcaptcha             Disable hCaptcha even if it is configured");
-  console.log("  codex-webui tunnel start --yes Skip the public-exposure confirmation after reviewing the checklist");
+  console.log("  forgeos tunnel start --yes Skip the public-exposure confirmation after reviewing the checklist");
 }
 
 function readOptionValue(argv, index, flagName) {
@@ -1503,10 +1595,10 @@ async function main() {
   if (command === "status") {
     const status = await readServerStatus(config);
     if (!status.pid || !status.running) {
-      console.log("codex-webui is not running.");
+      console.log("ForgeOS is not running.");
       return;
     }
-    console.log(status.verified ? "codex-webui is running." : "A process is running at the recorded PID, but it could not be verified.");
+    console.log(status.verified ? "ForgeOS is running." : "A process is running at the recorded PID, but it could not be verified.");
     console.log(`PID: ${status.pid}`);
     console.log(`URL: ${buildUrl(config)}`);
     console.log(`Config: ${configPath}`);
@@ -1519,10 +1611,10 @@ async function main() {
   if (command === "stop") {
     const result = await stopServer(config);
     if (result.unsafe) {
-      console.log(`Refusing to stop PID ${result.pid}: it could not be verified as this codex-webui instance.`);
+      console.log(`Refusing to stop PID ${result.pid}: it could not be verified as this ForgeOS instance.`);
       return;
     }
-    console.log(result.stopped ? `Stopped codex-webui (pid ${result.pid}).` : "codex-webui is not running.");
+    console.log(result.stopped ? `Stopped ForgeOS (pid ${result.pid}).` : "ForgeOS is not running.");
     return;
   }
 

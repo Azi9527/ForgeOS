@@ -1,25 +1,34 @@
 {
-  "name": "codex-webui",
+  "name": "forgeos-platform",
   "private": false,
-  "version": "0.1.0",
-  "description": "Claude-like web UI for Codex CLI with a Rust WebSocket gateway and SvelteKit frontend.",
+  "version": "0.3.0-rc.1",
+  "description": "ForgeOS enterprise AI-native application development, release, and operations platform built on the OpenAI Codex runtime.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Azi9527/ForgeOS.git"
+  },
+  "homepage": "https://github.com/Azi9527/ForgeOS#readme",
+  "bugs": {
+    "url": "https://github.com/Azi9527/ForgeOS/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "bin": {
+    "forgeos": "./bin/codex-webui.mjs",
     "codex-webui": "./bin/codex-webui.mjs"
   },
   "files": [
     "bin",
-    "build",
-    "backend",
-    "dist",
+    "build/static",
+    "dist/backend",
     "docs",
-    "scripts",
-    "src",
-    "static",
+    "scripts/gateway-data-backup.mjs",
+    "scripts/gateway-release.mjs",
     "README.md",
-    ".env.example",
-    "svelte.config.js",
-    "vite.config.ts"
+    ".env.example"
   ],
   "scripts": {
     "cli": "node ./bin/codex-webui.mjs",
@@ -39,6 +48,8 @@
     "test:frontend": "node --experimental-strip-types --test frontend-tests/*.test.mjs",
     "test:ws-client-backpressure": "node --test ./scripts/ws-client-backpressure.test.mjs",
     "test:gateway-release": "node --test ./scripts/gateway-release.test.mjs",
+    "test:gateway-data": "node --test ./scripts/gateway-data-backup.test.mjs",
+    "gateway:data": "node ./scripts/gateway-data-backup.mjs",
     "gateway:bundle": "node ./scripts/create-gateway-bundle.mjs",
     "gateway:dev": "setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all cargo run --manifest-path backend/Cargo.toml",
     "gateway:check": "cargo check --manifest-path backend/Cargo.toml",
