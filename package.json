@@ -62,11 +62,13 @@
     "hash-password": "node scripts/hash-password.mjs"
   },
   "dependencies": {
-    "@inlang/paraglide-js": "^2.16.0",
-    "ws": "^8.20.0",
-    "yaml": "^2.8.1"
+    "yaml": "2.8.3"
   },
+  "bundledDependencies": [
+    "yaml"
+  ],
   "devDependencies": {
+    "@inlang/paraglide-js": "^2.16.0",
     "@playwright/test": "^1.55.0",
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.48.4",
@@ -87,6 +89,7 @@
     "tailwindcss": "^4.2.2",
     "tslib": "^2.8.1",
     "typescript": "^6.0.2",
-    "vite": "^8.0.8"
+    "vite": "^8.0.8",
+    "ws": "^8.20.0"
   }
 }

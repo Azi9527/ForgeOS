@@ -77,6 +77,13 @@ jobs:
           $packJson = npm pack --ignore-scripts --pack-destination artifacts --json | Out-String
           if ($LASTEXITCODE -ne 0) { throw "ForgeOS operator package creation failed." }
           $package = $packJson | ConvertFrom-Json
+          if (@($package).Count -ne 1 -or $package[0].name -cne 'codex-webui' -or $package[0].version -cne $packageVersion) {
+            throw "ForgeOS operator pack metadata does not identify the expected single package."
+          }
+          $bundledDependencies = @($package[0].bundled)
+          if (($bundledDependencies -join ',') -cne 'yaml') {
+            throw "ForgeOS operator package must bundle exactly the pinned yaml runtime dependency."
+          }
           $filePaths = @($package[0].files | ForEach-Object { $_.path })
           foreach ($requiredPath in @(
             'README.md',
@@ -84,7 +91,11 @@ jobs:
             'build/static/index.html',
             'dist/backend/x86_64-pc-windows-msvc/backend.exe',
             'scripts/gateway-data-backup.mjs',
-            'scripts/gateway-release.mjs'
+            'scripts/gateway-release.mjs',
+            'scripts/gateway-start-lock.mjs',
+            'node_modules/yaml/package.json',
+            'node_modules/yaml/dist/index.js',
+            'node_modules/yaml/LICENSE'
           )) {
             if ($requiredPath -notin $filePaths) {
               throw "ForgeOS operator package is missing required runtime file '$requiredPath'."
@@ -94,11 +105,42 @@ jobs:
             if ($filePath.StartsWith('backend/src/') -or $filePath.StartsWith('src/')) {
               throw "ForgeOS operator package unexpectedly contains source file '$filePath'."
             }
+            if ($filePath.StartsWith('node_modules/') -and -not $filePath.StartsWith('node_modules/yaml/')) {
+              throw "ForgeOS operator package contains an unreviewed bundled dependency '$filePath'."
+            }
           }
           $source = Join-Path artifacts $package[0].filename
           if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "ForgeOS operator package was not created." }
           $target = Join-Path artifacts "forgeos-platform-$packageVersion-windows-x64.tgz"
           Move-Item -LiteralPath $source -Destination $target -Force
+          $offlineRoot = Join-Path $env:RUNNER_TEMP "forgeos-operator-offline-$env:GITHUB_RUN_ATTEMPT"
+          $offlineCache = Join-Path $offlineRoot 'npm-cache'
+          New-Item -ItemType Directory -Path $offlineRoot -Force | Out-Null
+          if (Test-Path -LiteralPath $offlineCache) { throw "Offline smoke-test cache was not empty." }
+          npm install --prefix $offlineRoot --ignore-scripts --no-audit --no-fund --omit=dev --package-lock=false --save=false --offline --cache $offlineCache $target
+          if ($LASTEXITCODE -ne 0) { throw "ForgeOS operator package is not self-contained for offline installation." }
+          $installedRoot = Join-Path $offlineRoot 'node_modules/codex-webui'
+          $installedPackage = Get-Content -LiteralPath (Join-Path $installedRoot 'package.json') -Raw | ConvertFrom-Json
+          $runtimeDependencies = @($installedPackage.dependencies.PSObject.Properties.Name)
+          if (($runtimeDependencies -join ',') -cne 'yaml' -or $installedPackage.dependencies.yaml -cne '2.8.3') {
+            throw "ForgeOS operator runtime dependencies are not pinned to the reviewed closure."
+          }
+          if ((@($installedPackage.bundledDependencies) -join ',') -cne 'yaml') {
+            throw "ForgeOS operator package metadata does not preserve the bundled runtime closure."
+          }
+          $installedYaml = Get-Content -LiteralPath (Join-Path $installedRoot 'node_modules/yaml/package.json') -Raw | ConvertFrom-Json
+          if ($installedYaml.version -cne $installedPackage.dependencies.yaml) {
+            throw "ForgeOS operator bundled yaml version does not match package metadata."
+          }
+          $installedCli = Join-Path $installedRoot 'bin/codex-webui.mjs'
+          $resolvedYaml = & node '--input-type=module' '-e' 'import { createRequire } from "node:module"; import { pathToFileURL } from "node:url"; const require = createRequire(pathToFileURL(process.argv[1])); process.stdout.write(require.resolve("yaml"));' $installedCli
+          if ($LASTEXITCODE -ne 0) { throw "ForgeOS operator could not resolve its bundled yaml dependency." }
+          $yamlRoot = [IO.Path]::GetFullPath((Join-Path $installedRoot 'node_modules/yaml')).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+          if (-not [IO.Path]::GetFullPath($resolvedYaml).StartsWith($yamlRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "ForgeOS operator resolved yaml outside the signed package."
+          }
+          & node $installedCli '--help' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "ForgeOS operator CLI could not load from the offline package." }
           $digest = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -LiteralPath "$target.sha256" -Value "$digest  $([IO.Path]::GetFileName($target))" -Encoding utf8NoBOM
       - name: Attest Windows release assets
