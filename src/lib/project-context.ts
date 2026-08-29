@@ -23,6 +23,9 @@ type ResolveProjectContextOptions = {
 };
 
 function projectMatchesSession(project: SessionFolder, session: SessionSummary) {
+  if (project.projectId) {
+    return project.conversationIds?.includes(session.id) ?? false;
+  }
   if (session.tags.includes(project.name)) {
     return true;
   }
@@ -38,6 +41,9 @@ export function resolveProjectContext({
 }: ResolveProjectContextOptions): ProjectContext | null {
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const explicitProject = projects.find((project) => project.name === activeProjectName) ?? null;
+  const boundProject = selectedSession
+    ? projects.find((project) => project.projectId && project.conversationIds?.includes(selectedSession.id)) ?? null
+    : null;
   const taggedProject = selectedSession
     ? projects.find((project) => selectedSession.tags.includes(project.name)) ?? null
     : null;
@@ -45,7 +51,7 @@ export function resolveProjectContext({
   const rootedProject = selectedRoot
     ? projects.find((project) => normalizeProjectRootPath(project.rootPath) === selectedRoot) ?? null
     : null;
-  const project = explicitProject ?? taggedProject ?? rootedProject;
+  const project = explicitProject ?? boundProject ?? taggedProject ?? rootedProject;
   if (!project) {
     return null;
   }
@@ -58,7 +64,7 @@ export function resolveProjectContext({
 
   return {
     project,
-    identity: normalizeProjectRootPath(rootPath) ?? project.name.toLocaleLowerCase(),
+    identity: project.projectId ?? normalizeProjectRootPath(rootPath) ?? project.name.toLocaleLowerCase(),
     rootPath,
     repoPath: project.repoPath ?? activeSession?.preferences?.gitRepoPath ?? null,
     managed: project.managed !== false,

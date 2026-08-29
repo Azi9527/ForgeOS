@@ -378,6 +378,7 @@ pub(crate) async fn get_config_payload(state: &AppState, profile_id: &str) -> Ap
                     .unwrap_or_else(|| json!([])),
                 known_tags_from_ui_state(ui_state),
                 session_folders_from_ui_state(ui_state),
+                project_registry_payload_from_ui_state(ui_state),
                 sorted_prompt_presets_from_ui_state(ui_state),
                 sorted_automations_from_ui_state(ui_state),
                 recent_automation_runs_from_ui_state(
@@ -430,6 +431,7 @@ pub(crate) async fn get_config_payload(state: &AppState, profile_id: &str) -> Ap
         saved_filters,
         known_tags,
         session_folders,
+        project_registry,
         prompt_presets,
         automations,
         recent_runs,
@@ -527,6 +529,7 @@ pub(crate) async fn get_config_payload(state: &AppState, profile_id: &str) -> Ap
             "knownTags": known_tags,
             "sessionFolders": session_folders
         },
+        "projectRegistry": project_registry,
         "promptPresets": prompt_presets,
         "automations": {
             "items": automations,

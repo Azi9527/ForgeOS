@@ -77,3 +77,16 @@ test("selected conversation restores its project across Windows path formats", (
   assert.equal(context?.identity, "d:\\codex\\aps");
   assert.equal(context?.repoPath, "D:\\codex\\APS");
 });
+
+test("V2 project identity owns conversations independently of display name and tags", () => {
+  const context = resolveProjectContext({
+    projects: [project({ projectId: "prj_aps", name: "APS Renamed", conversationIds: ["selected"] })],
+    sessions: [session("selected", { cwd: "D:\\another-root", tags: [] })],
+    activeProjectName: null,
+    selectedSessionId: "selected"
+  });
+
+  assert.equal(context?.identity, "prj_aps");
+  assert.equal(context?.project.name, "APS Renamed");
+  assert.deepEqual(context?.sessions.map((entry) => entry.id), ["selected"]);
+});

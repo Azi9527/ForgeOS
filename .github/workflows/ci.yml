@@ -111,6 +111,7 @@ jobs:
 
       - name: Test project lifecycle and gateway release controls
         run: |
+          cargo test --manifest-path backend/Cargo.toml project_registry_support
           cargo test --manifest-path backend/Cargo.toml project_lifecycle_support
           cargo test --manifest-path backend/Cargo.toml project_artifact_support
           pnpm test:gateway-release
@@ -121,5 +122,8 @@ jobs:
       - name: Build fake Codex app-server
         run: pnpm build:e2e-fake
 
-      - name: Run computer input E2E
+      - name: Run session workspace E2E
         run: pnpm exec playwright test e2e/computer-input.spec.ts e2e/continuous-session.spec.ts --reporter=line --workers=1
+
+      - name: Run Project Registry E2E
+        run: pnpm exec playwright test e2e/project-platform.spec.ts --reporter=line --workers=1

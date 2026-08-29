@@ -57,45 +57,53 @@ async function login(page: import("@playwright/test").Page) {
 }
 
 test("opens a project folder into release and operations workspaces", async ({ page }) => {
+  test.setTimeout(180_000);
   await login(page);
   const projectName = `Enterprise Pilot ${Date.now()}`;
-  const created = await wsRequest(page, "sessionFolders/upsert", {
+  const created = await wsRequest<{
+    project: { projectId: string; name: string };
+  }>(page, "project/create", {
     name: projectName,
-    pinned: true,
     rootPath: process.cwd(),
-    repoPath: process.cwd(),
-    markOpened: true
+    repositoryRoot: process.cwd()
   });
   expect(created.ok, created.error).toBeTruthy();
+  const projectId = created.result?.project.projectId;
+  expect(projectId).toMatch(/^prj_/u);
 
   try {
     await page.reload();
+    await page
+      .getByTestId("enterprise-rail")
+      .getByRole("button", { name: /项目中心/u })
+      .click();
     const card = page.getByTestId("project-folder-card").filter({ hasText: projectName });
     await expect(card).toBeVisible();
-    await card.getByRole("button", { name: "发布" }).click();
-    await expect(page.getByTestId("project-navigation")).toBeVisible();
+    await expect(card).toHaveAttribute("data-project-id", projectId ?? "");
+    await card.getByRole("button", { name: "发布", exact: true }).click();
+    const projectNavigation = page.getByTestId("project-navigation");
+    await expect(projectNavigation).toBeVisible();
     await expect(page.getByTestId("project-release-workspace")).toBeVisible();
 
-    await page.getByRole("button", { name: "运维" }).last().click();
+    await projectNavigation.getByRole("button", { name: "环境", exact: true }).click({ timeout: 15_000 });
     await expect(page.getByTestId("project-operations-workspace")).toBeVisible();
 
-    await page.getByRole("button", { name: "验证" }).last().click();
+    await projectNavigation.getByRole("button", { name: "验证", exact: true }).click({ timeout: 15_000 });
     await expect(page.getByTestId("project-validation-workspace")).toBeVisible();
-    await page.getByRole("button", { name: "配置流程" }).click();
+    await page.getByRole("button", { name: "配置流程", exact: true }).click({ timeout: 15_000 });
     await page.locator("#validation-build").fill("node -e \"console.log('forgeos-validation-e2e')\"");
-    await page.getByRole("button", { name: "保存配置" }).click();
-    await page.getByTestId("validation-run").click();
+    await page.getByRole("button", { name: "保存配置", exact: true }).click({ timeout: 15_000 });
+    await page.getByTestId("validation-run").click({ timeout: 15_000 });
     await expect(page.getByTestId("validation-history").getByText("验证通过").first()).toBeVisible({ timeout: 30_000 });
 
-    await page.getByRole("button", { name: "AI 开发" }).click();
+    await projectNavigation.getByRole("button", { name: "AI 开发", exact: true }).click({ timeout: 15_000 });
     await expect(page.getByTestId("composer-input")).toBeVisible();
 
-    await page.getByRole("button", { name: "项目中心" }).click();
+    await projectNavigation.getByRole("button", { name: "项目", exact: true }).click({ timeout: 15_000 });
     await expect(page.getByTestId("enterprise-project-portal")).toBeVisible();
   } finally {
-    const removed = await wsRequest(page, "sessionFolders/delete", {
-      name: projectName,
-      removeFromSessions: true
+    const removed = await wsRequest(page, "project/archive", {
+      projectId
     });
     expect(removed.ok, removed.error).toBeTruthy();
   }

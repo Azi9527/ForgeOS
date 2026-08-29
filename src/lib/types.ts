@@ -91,6 +91,10 @@ export type ProjectSessionSettings = {
 };
 
 export type SessionFolder = {
+  projectId?: string | null;
+  revision?: number | null;
+  status?: "active" | "archived";
+  conversationIds?: string[];
   name: string;
   managed?: boolean;
   pinned: boolean;
@@ -102,6 +106,62 @@ export type SessionFolder = {
   settings?: ProjectSessionSettings;
   createdAt: number | null;
   updatedAt: number | null;
+};
+
+export type ProjectRecordV2 = {
+  schemaVersion: 2;
+  projectId: string;
+  name: string;
+  rootPath: string;
+  repositoryRoot: string | null;
+  status: "active" | "archived";
+  pinned: boolean;
+  settings: ProjectSessionSettings;
+  aliases: string[];
+  source: "created" | "migrated" | string;
+  legacyName: string | null;
+  lastConversationId: string | null;
+  lastOpenedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  revision: number;
+  conversationIds: string[];
+  conversationCount: number;
+};
+
+export type ProjectRegistryPayload = {
+  schemaVersion: 2;
+  projects: ProjectRecordV2[];
+  nextCursor?: string | null;
+};
+
+export type ProjectMigrationCandidate = {
+  candidateKey: string;
+  source: "sessionFolder" | "conversationCwd";
+  name: string;
+  rootPath: string | null;
+  repositoryRoot: string | null;
+  conversationIds: string[];
+  status: "ready" | "alreadyImported" | "needsRoot" | "conflict";
+  existingProjectId: string | null;
+  proposedProjectId: string;
+  warnings: string[];
+};
+
+export type ProjectMigrationPreview = {
+  schemaVersion: 2;
+  writePerformed: false;
+  candidates: ProjectMigrationCandidate[];
+  warnings: string[];
+};
+
+export type ProjectRegistryMutationPayload = {
+  created?: boolean;
+  project?: ProjectRecordV2;
+  imported?: Array<{ candidateKey: string; projectId: string }>;
+  projectRegistry: ProjectRegistryPayload;
+  knownTags: string[];
+  sessionFolders: SessionFolder[];
 };
 
 export type ProjectLifecycleOperator = {
@@ -588,6 +648,7 @@ export type AppConfigPayload = {
     knownTags: string[];
     sessionFolders: SessionFolder[];
   };
+  projectRegistry: ProjectRegistryPayload;
   promptPresets: PromptPreset[];
   automations: {
     items: AutomationDefinition[];

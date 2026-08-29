@@ -11,6 +11,10 @@ pub(crate) fn is_ws_method_allowed(role: UserRole, method: &str) -> bool {
             | "sessions/list"
             | "sessions/search"
             | "session/get"
+            | "project/list"
+            | "project/get"
+            | "project/import/preview"
+            | "project/conversation/list"
             | "projectLifecycle/get"
             | "projectLifecycle/audit/list"
             | "session/olderTurns/get"
@@ -138,6 +142,10 @@ pub(crate) fn should_audit_ws_method(method: &str) -> bool {
             | "sessions/list"
             | "sessions/search"
             | "session/get"
+            | "project/list"
+            | "project/get"
+            | "project/import/preview"
+            | "project/conversation/list"
             | "projectLifecycle/audit/list"
             | "session/draft/get"
             | "session/queue/get"
@@ -181,6 +189,7 @@ pub(crate) fn summarize_audit_target(params: &Value) -> Option<String> {
         "repoPath",
         "filePath",
         "projectName",
+        "projectId",
     ] {
         if let Some(value) = params
             .get(key)
