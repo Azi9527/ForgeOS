@@ -72,6 +72,10 @@ test("opens a project folder into release and operations workspaces", async ({ p
 
   try {
     await page.reload();
+    await page
+      .getByTestId("enterprise-rail")
+      .getByRole("button", { name: /项目中心/u })
+      .click();
     const card = page.getByTestId("project-folder-card").filter({ hasText: projectName });
     await expect(card).toBeVisible();
     await expect(card).toHaveAttribute("data-project-id", projectId ?? "");
