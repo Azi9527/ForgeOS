@@ -14,6 +14,7 @@
     loginLede: string;
     forgeTagline: string;
     forgeStory: string;
+    forgeDescription: string;
     forgeTaskDriven: string;
     forgeValidationFirst: string;
     forgeControlledExecution: string;
@@ -61,13 +62,13 @@
           <div class="forge-mark forge-mark--large">F</div>
           <div>
             <p class="text-xl font-semibold tracking-tight">ForgeOS</p>
-            <p class="text-[10px] font-bold uppercase tracking-[0.24em] text-white/45">AI Native Engineering OS</p>
+            <p class="text-[10px] font-bold uppercase tracking-[0.24em] text-white/45">Enterprise AI Native Platform</p>
           </div>
         </div>
         <div class="mt-20 max-w-md">
           <p class="text-xs font-bold uppercase tracking-[0.26em] text-[#8b7cff]">{ui.forgeTagline}</p>
           <h1 class="mt-4 text-4xl font-semibold leading-tight tracking-[-0.04em]">{ui.forgeStory}</h1>
-          <p class="mt-5 max-w-sm text-sm leading-7 text-white/55">组织项目、驱动 AI 执行、审阅代码变更，并让每一次完成都有验证证据。</p>
+          <p class="mt-5 max-w-md text-sm leading-7 text-white/55">{ui.forgeDescription}</p>
         </div>
       </div>
       <div class="relative z-10 grid grid-cols-3 gap-3">

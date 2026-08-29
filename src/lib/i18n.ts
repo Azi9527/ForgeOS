@@ -4,7 +4,7 @@ import { get, writable } from "svelte/store";
 import { getLocale, getTextDirection, setLocale, type Locale } from "$lib/paraglide/runtime.js";
 
 export const localeSignal = writable(0);
-export const activeLocale = writable<Locale>("en");
+export const activeLocale = writable<Locale>("zh-Hans");
 
 export const localeOptions = [
   { value: "en", label: "English" },
@@ -30,7 +30,7 @@ function applyLocaleToDocument(locale: Locale) {
 }
 
 export function syncLocale(locale?: string | null) {
-  const nextLocale = ((locale?.trim() || getLocale()) as Locale) ?? "en";
+  const nextLocale = ((locale?.trim() || getLocale()) as Locale) ?? "zh-Hans";
   activeLocale.set(nextLocale);
   applyLocaleToDocument(nextLocale);
   localeSignal.update((value) => value + 1);
