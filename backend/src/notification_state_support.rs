@@ -462,13 +462,40 @@ pub(crate) fn validate_notification_webhook_host_allowlist(
 }
 
 pub(crate) fn notification_webhook_ip_is_private_or_local(ip: std::net::IpAddr) -> bool {
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || match ip {
-            std::net::IpAddr::V4(value) => value.is_private() || value.is_link_local(),
-            std::net::IpAddr::V6(value) => value.is_unique_local() || value.is_unicast_link_local(),
+    match ip {
+        std::net::IpAddr::V4(value) => {
+            let [first, second, third, _fourth] = value.octets();
+            value.is_loopback()
+                || value.is_unspecified()
+                || value.is_multicast()
+                || value.is_private()
+                || value.is_link_local()
+                || value.is_broadcast()
+                || first == 0
+                || (first == 100 && (64..=127).contains(&second))
+                || (first == 192 && second == 0 && matches!(third, 0 | 2))
+                || (first == 192 && second == 88 && third == 99)
+                || (first == 198 && matches!(second, 18 | 19))
+                || (first == 198 && second == 51 && third == 100)
+                || (first == 203 && second == 0 && third == 113)
+                || first >= 240
         }
+        std::net::IpAddr::V6(value) => {
+            if let Some(mapped) = value.to_ipv4_mapped() {
+                return notification_webhook_ip_is_private_or_local(std::net::IpAddr::V4(mapped));
+            }
+            let segments = value.segments();
+            value.is_loopback()
+                || value.is_unspecified()
+                || value.is_multicast()
+                || value.is_unique_local()
+                || value.is_unicast_link_local()
+                || segments[0] & 0xffc0 == 0xfec0
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || (segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0)
+                || (segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 1)
+        }
+    }
 }
 
 pub(crate) async fn resolve_notification_webhook_public_addrs(

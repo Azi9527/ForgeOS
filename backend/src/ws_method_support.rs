@@ -15,7 +15,6 @@ pub(crate) fn is_ws_method_allowed(role: UserRole, method: &str) -> bool {
             | "project/get"
             | "project/import/preview"
             | "project/conversation/list"
-            | "projectLifecycle/get"
             | "projectLifecycle/migration/get"
             | "projectLifecycle/audit/list"
             | "session/olderTurns/get"
@@ -50,6 +49,9 @@ pub(crate) fn ws_method_requires_owner(method: &str, params: &Value) -> bool {
             | "runtime/update"
             | "gateway/restart"
             | "memory/reset"
+            | "projectLifecycle/validation/save"
+            | "projectLifecycle/validation/run"
+            | "projectLifecycle/validation/cancel"
             | "projectLifecycle/governance/save"
             | "terminal/list"
             | "terminal/create"
@@ -190,8 +192,8 @@ pub(crate) fn summarize_audit_target(params: &Value) -> Option<String> {
         "filterId",
         "repoPath",
         "filePath",
-        "projectName",
         "projectId",
+        "projectName",
     ] {
         if let Some(value) = params
             .get(key)

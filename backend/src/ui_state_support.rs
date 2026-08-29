@@ -6,6 +6,13 @@ const UI_STATE_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const STORED_NOTIFICATION_NAME_MAX_CHARS: usize = 160;
 const STORED_NOTIFICATION_PAYLOAD_MAX_BYTES: usize = 16 * 1024;
 
+#[derive(Clone, Debug)]
+pub(crate) struct UiStateTextFileUpdate {
+    pub(crate) path: PathBuf,
+    pub(crate) content: String,
+    pub(crate) allowed_roots: Vec<PathBuf>,
+}
+
 pub(crate) fn compact_stored_notification(notification: &mut Value) {
     let Some(notification) = notification.as_object_mut() else {
         return;
@@ -621,7 +628,7 @@ pub(crate) async fn write_file_atomically(path: &Path, bytes: Vec<u8>) -> Result
         temp_file.write_all(&bytes).await?;
         temp_file.sync_all().await?;
         drop(temp_file);
-        tokio_fs::rename(&temp_path, path).await?;
+        replace_file_atomically(&temp_path, path).await?;
         if let Ok(parent_dir) = tokio_fs::File::open(parent).await {
             let _ = parent_dir.sync_all().await;
         }
@@ -757,6 +764,162 @@ where
             error.to_string(),
         ));
     }
+    let mut persistence = state.ui_state_persistence.lock().await;
+    let entry = persistence.entry(resolved_profile_id).or_default();
+    entry.persisted_revision = entry.persisted_revision.max(revision);
+    Ok(result)
+}
+
+async fn rollback_text_file_updates(
+    updates: &[(UiStateTextFileUpdate, Option<Vec<u8>>)],
+) -> Result<()> {
+    let mut rollback_error = None;
+    for (update, previous) in updates.iter().rev() {
+        let result = match previous {
+            Some(previous) => write_file_atomically(&update.path, previous.clone()).await,
+            None => match tokio_fs::remove_file(&update.path).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            },
+        };
+        if let Err(error) = result {
+            rollback_error.get_or_insert(error);
+        }
+    }
+    rollback_error.map_or(Ok(()), Err)
+}
+
+async fn validate_text_file_update_target(update: &UiStateTextFileUpdate) -> Result<()> {
+    if !update
+        .allowed_roots
+        .iter()
+        .any(|root| path_is_within(root, &update.path))
+    {
+        return Err(anyhow!("project manifest path is outside allowed roots"));
+    }
+    let parent = update
+        .path
+        .parent()
+        .ok_or_else(|| anyhow!("project manifest path has no parent"))?;
+    let mut ancestor = PathBuf::new();
+    for component in parent.components() {
+        ancestor.push(component.as_os_str());
+        if tokio_fs::symlink_metadata(&ancestor)
+            .await
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(anyhow!(
+                "refusing to update a project manifest through a symlink"
+            ));
+        }
+    }
+    if tokio_fs::symlink_metadata(&update.path)
+        .await
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(anyhow!("refusing to replace a symlinked project manifest"));
+    }
+    Ok(())
+}
+
+pub(crate) async fn commit_value_and_text_file_updates<P, Fut>(
+    current: &mut Value,
+    next: Value,
+    updates: Vec<UiStateTextFileUpdate>,
+    persist_value: P,
+) -> Result<()>
+where
+    P: FnOnce(Value) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut paths = HashSet::new();
+    if updates
+        .iter()
+        .any(|update| !paths.insert(update.path.clone()))
+    {
+        return Err(anyhow!("duplicate paths in atomic UI state file update"));
+    }
+
+    let mut prepared = Vec::with_capacity(updates.len());
+    for update in updates {
+        validate_text_file_update_target(&update).await?;
+        let previous = match tokio_fs::read(&update.path).await {
+            Ok(previous) => Some(previous),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("failed to snapshot a project manifest"),
+        };
+        prepared.push((update, previous));
+    }
+
+    let mut applied = Vec::with_capacity(prepared.len());
+    for (update, previous) in prepared {
+        applied.push((update.clone(), previous));
+        if let Err(error) =
+            write_text_file_safely(&update.path, &update.content, &update.allowed_roots).await
+        {
+            rollback_text_file_updates(&applied).await?;
+            return Err(anyhow!(error.message)).context("failed to write a project manifest");
+        }
+    }
+
+    if let Err(error) = persist_value(next.clone()).await {
+        rollback_text_file_updates(&applied)
+            .await
+            .context("failed to roll back project manifests")?;
+        return Err(error);
+    }
+    *current = next;
+    Ok(())
+}
+
+pub(crate) async fn with_ui_state_and_text_files_write<R, F>(
+    state: &AppState,
+    profile_id: &str,
+    writer: F,
+) -> ApiResult<R>
+where
+    F: FnOnce(&mut Value) -> ApiResult<(R, Vec<UiStateTextFileUpdate>)>,
+{
+    let resolved_profile_id = resolve_runtime_profile_entry(&state.config, profile_id)
+        .0
+        .to_string();
+    let lock = ui_state_lock(state, &resolved_profile_id).await;
+    let _guard = lock.lock().await;
+    ensure_cached_profile_ui_state(state, &resolved_profile_id)
+        .await
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let cached = state
+        .ui_state_cache
+        .lock()
+        .await
+        .get(&resolved_profile_id)
+        .cloned()
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cached ui-state is missing",
+            )
+        })?;
+    let result = {
+        let mut current = cached.lock().await;
+        let mut next = current.clone();
+        let (result, updates) = writer(&mut next)?;
+        let config = Arc::clone(&state.config);
+        let persisted_profile_id = resolved_profile_id.clone();
+        commit_value_and_text_file_updates(
+            &mut current,
+            next,
+            updates,
+            move |snapshot| async move {
+                write_profile_ui_state(&config, &persisted_profile_id, &snapshot).await
+            },
+        )
+        .await
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        result
+    };
+    let revision = mark_ui_state_dirty(state, &resolved_profile_id).await;
     let mut persistence = state.ui_state_persistence.lock().await;
     let entry = persistence.entry(resolved_profile_id).or_default();
     entry.persisted_revision = entry.persisted_revision.max(revision);

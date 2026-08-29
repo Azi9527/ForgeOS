@@ -649,7 +649,7 @@ pub(crate) fn apply_security_headers(headers: &mut HeaderMap) {
         .or_insert(HeaderValue::from_static("DENY"));
 }
 
-pub(crate) fn redact_user_facing_error(message: &str) -> String {
+pub(crate) fn redact_engineering_evidence(message: &str) -> String {
     let mut redacted = message.to_string();
     if let Ok(home) = env::var("HOME") {
         let home = home.trim();
@@ -724,8 +724,12 @@ pub(crate) fn redact_user_facing_error(message: &str) -> String {
         "access_token",
         "refresh_token",
         "id_token",
+        "api_key",
+        "client_secret",
         "authorization",
         "password",
+        "token",
+        "secret",
         "session_secret",
         "sessionSecret",
         "hcaptchaSecretKey",
@@ -769,8 +773,17 @@ pub(crate) fn redact_user_facing_error(message: &str) -> String {
         }
     }
 
+    redacted
+}
+
+pub(crate) fn redact_user_facing_error(message: &str) -> String {
+    let mut redacted = redact_engineering_evidence(message);
     if redacted.len() > 4000 {
-        redacted.truncate(4000);
+        let mut end = 4000;
+        while !redacted.is_char_boundary(end) {
+            end -= 1;
+        }
+        redacted.truncate(end);
         redacted.push_str("...[truncated]");
     }
     redacted

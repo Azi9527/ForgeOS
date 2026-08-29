@@ -751,6 +751,103 @@ async fn owner_config_blocks_admin_from_owner_only_websocket_methods() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_governance_uses_admin_as_owner_equivalent_only_in_default_mode() {
+    let sandbox = unique_test_dir("project-governance-owner-policy");
+    let workspace = sandbox.join("workspace");
+    let codex_home = sandbox.join("codex-home");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&codex_home).unwrap();
+    let mut state = test_state(workspace.clone(), vec![workspace], codex_home);
+    with_ui_state_write(&state, "default", |ui_state| {
+        ui_state["projectRegistry"]["projectsById"]["prj_test"] = json!({
+            "projectId": "prj_test",
+            "name": "Test Project"
+        });
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let admin = AuthContext {
+        profile_id: "default".to_string(),
+        role: UserRole::Admin,
+    };
+    assert!(
+        authorize_ws_method(
+            &state.config,
+            admin.role,
+            "projectLifecycle/governance/save",
+            &json!({})
+        )
+        .is_ok()
+    );
+    let lifecycle = save_project_governance_payload(
+        &state,
+        &admin,
+        json!({
+            "projectId": "prj_test",
+            "governance": {
+                "approvalPolicy": { "standardApprovals": 2, "productionApprovals": 3 }
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        lifecycle["governance"]["approvalPolicy"]["standardApprovals"],
+        json!(2)
+    );
+
+    let mut config = (*state.config).clone();
+    config.require_owner_role = true;
+    state.config = Arc::new(config);
+    assert!(
+        authorize_ws_method(
+            &state.config,
+            admin.role,
+            "projectLifecycle/governance/save",
+            &json!({})
+        )
+        .expect_err("dedicated-owner mode should reject admin governance changes")
+        .to_string()
+        .contains("OWNER_REQUIRED")
+    );
+    let error = save_project_governance_payload(
+        &state,
+        &admin,
+        json!({ "projectId": "prj_test", "governance": {} }),
+    )
+    .await
+    .expect_err("the lifecycle handler must independently reject an admin");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+
+    let owner = AuthContext {
+        profile_id: "default".to_string(),
+        role: UserRole::Owner,
+    };
+    assert!(
+        authorize_ws_method(
+            &state.config,
+            owner.role,
+            "projectLifecycle/governance/save",
+            &json!({})
+        )
+        .is_ok()
+    );
+    assert!(
+        save_project_governance_payload(
+            &state,
+            &owner,
+            json!({ "projectId": "prj_test", "governance": {} }),
+        )
+        .await
+        .is_ok()
+    );
+
+    let _ = fs::remove_dir_all(sandbox);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_profile_request_slots_are_bounded() {
     let sandbox = unique_test_dir("ws-profile-slots");
     let workspace = sandbox.join("workspace");
@@ -1836,6 +1933,10 @@ fn viewer_websocket_permissions_are_session_observation_only() {
         "sessions/list",
         "sessions/search",
         "session/get",
+        "project/list",
+        "project/get",
+        "projectLifecycle/migration/get",
+        "projectLifecycle/audit/list",
         "session/olderTurns/get",
         "session/turn/get",
         "session/latestCompletedTurn/get",
@@ -1863,6 +1964,18 @@ fn viewer_websocket_permissions_are_session_observation_only() {
         "terminal/list",
         "terminal/read",
         "gateway/restart",
+        "projectLifecycle/get",
+        "projectLifecycle/migration/commit",
+        "projectLifecycle/migration/rollback",
+        "projectLifecycle/migration/recover",
+        "projectLifecycle/validation/save",
+        "projectLifecycle/validation/run",
+        "projectLifecycle/validation/cancel",
+        "projectLifecycle/governance/save",
+        "projectLifecycle/release/save",
+        "projectLifecycle/operations/save",
+        "projectLifecycle/deployment/run",
+        "projectLifecycle/environment/check",
         "session/draft/get",
         "session/queue/get",
     ] {
@@ -1870,6 +1983,31 @@ fn viewer_websocket_permissions_are_session_observation_only() {
             !is_ws_method_allowed(UserRole::Viewer, method),
             "{method} should require admin"
         );
+    }
+}
+
+#[test]
+fn project_lifecycle_audit_targets_the_stable_project_id() {
+    let params = json!({
+        "projectId": "prj_stable",
+        "projectName": "Renameable Project",
+        "environmentId": "production"
+    });
+
+    assert_eq!(
+        summarize_audit_target(&params),
+        Some("prj_stable".to_string())
+    );
+    for method in [
+        "projectLifecycle/validation/save",
+        "projectLifecycle/validation/run",
+        "projectLifecycle/governance/save",
+        "projectLifecycle/release/save",
+        "projectLifecycle/operations/save",
+        "projectLifecycle/deployment/run",
+        "projectLifecycle/environment/check",
+    ] {
+        assert!(should_audit_ws_method(method), "{method} must be audited");
     }
 }
 
@@ -1919,6 +2057,15 @@ async fn viewer_http_routes_match_websocket_authorization_policy() {
         (Method::GET, "/api/git/status?repoPath=/tmp/repo"),
         (Method::GET, "/api/account"),
         (Method::POST, "/api/account/logout"),
+        (Method::POST, "/api/project-artifacts"),
+        (
+            Method::GET,
+            "/api/project-artifacts/verify?projectId=prj_test&artifactId=artifact-1",
+        ),
+        (
+            Method::GET,
+            "/api/project-artifacts/download?projectId=prj_test&artifactId=artifact-1",
+        ),
     ] {
         let request = Request::builder()
             .method(method.clone())

@@ -577,13 +577,14 @@ pub(crate) async fn execute_ws_method(
                 .await
                 .map_err(anyhow::Error::from)
         }
-        "projectLifecycle/validation/save" => {
-            save_project_validation_payload(state, &auth.profile_id, params)
-                .await
-                .map_err(anyhow::Error::from)
-        }
-        "projectLifecycle/validation/record" => {
-            record_project_validation_payload(state, auth, params)
+        "projectLifecycle/validation/save" => save_project_validation_payload(state, auth, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "projectLifecycle/validation/run" => run_project_validation_payload(state, auth, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "projectLifecycle/validation/cancel" => {
+            cancel_project_validation_payload(state, auth, params)
                 .await
                 .map_err(anyhow::Error::from)
         }
@@ -596,6 +597,14 @@ pub(crate) async fn execute_ws_method(
         "projectLifecycle/operations/save" => save_project_operations_payload(state, auth, params)
             .await
             .map_err(anyhow::Error::from),
+        "projectLifecycle/deployment/run" => run_project_deployment_payload(state, auth, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "projectLifecycle/environment/check" => {
+            check_project_environment_payload(state, auth, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
         "sessionFilters/save" => save_session_filter_payload(
             state,
             &auth.profile_id,

@@ -108,8 +108,6 @@
   import { activeLocale, localeOptions, localeSignal, updateLocale } from "$lib/i18n";
   import { m } from "$lib/paraglide/messages.js";
   import {
-    buildProjectManifest,
-    buildProjectManifestPath,
     buildProjectRootPath,
     normalizeProjectFolderName,
     normalizeProjectRootPath
@@ -416,6 +414,7 @@
     tags: []
   });
   let activeSavedSessionFilterId = $state<string | null>(null);
+  let activeProjectId = $state<string | null>(null);
   let activeSessionFolder = $state<string | null>(null);
   let activeDiscoveredProjectRoot = $state<string | null>(null);
   let platformView = $state<PlatformView>("portal");
@@ -615,6 +614,7 @@
   const sessionFilterUntaggedParamKey = "sessionUntagged";
   const sessionFilterHighlightParamKey = "sessionHighlight";
   const sessionFilterTagParamKey = "sessionTag";
+  const projectIdParamKey = "projectId";
   const sessionFolderParamKey = "sessionFolder";
   const discoveredProjectNameParamKey = "project";
   const discoveredProjectRootParamKey = "projectRoot";
@@ -1668,6 +1668,7 @@
         if (!project?.rootPath) {
           throw new Error(`项目“${projectName}”尚未建立独立目录。`);
         }
+        activeProjectId = project.projectId ?? null;
         activeSessionFolder = projectName;
         const preferences = projectSessionPreferences(project, config.defaults);
         draftState = {
@@ -2503,6 +2504,7 @@
     resolveProjectContext({
       projects: portalProjects,
       sessions,
+      activeProjectId,
       activeProjectName: activeSessionFolder,
       selectedSessionId
     })
@@ -4186,7 +4188,10 @@
     const highlight = params.get(sessionFilterHighlightParamKey);
     const discoveredProjectName = params.get(discoveredProjectNameParamKey)?.trim() ?? "";
     const discoveredProjectRoot = params.get(discoveredProjectRootParamKey)?.trim() ?? "";
-    const folder = discoveredProjectName && discoveredProjectRoot ? "" : params.get(sessionFolderParamKey)?.trim() ?? "";
+    const requestedProjectId = params.get(projectIdParamKey)?.trim() ?? "";
+    const folder = requestedProjectId || (discoveredProjectName && discoveredProjectRoot)
+      ? ""
+      : params.get(sessionFolderParamKey)?.trim() ?? "";
     const untaggedOnly = !folder && isEnabledQueryParam(params.get(sessionFilterUntaggedParamKey));
     const tags = params
       .getAll(sessionFilterTagParamKey)
@@ -4197,8 +4202,9 @@
     sessionSearchScope = scope === "full" ? "full" : "summary";
     showArchivedSessions = isEnabledQueryParam(params.get(sessionArchivedParamKey));
     activeSavedSessionFilterId = params.get(sessionSavedFilterParamKey)?.trim() || null;
-    activeSessionFolder = discoveredProjectName || folder || null;
-    activeDiscoveredProjectRoot = discoveredProjectName && discoveredProjectRoot ? discoveredProjectRoot : null;
+    activeProjectId = requestedProjectId || null;
+    activeSessionFolder = requestedProjectId ? null : discoveredProjectName || folder || null;
+    activeDiscoveredProjectRoot = !requestedProjectId && discoveredProjectName && discoveredProjectRoot ? discoveredProjectRoot : null;
     sessionFilter = normalizeSessionFilterState({
       pinnedOnly: isEnabledQueryParam(params.get(sessionFilterPinnedParamKey)),
       runningOnly: isEnabledQueryParam(params.get(sessionFilterRunningParamKey)),
@@ -4262,15 +4268,23 @@
       }
     }
 
-    if (activeSessionFolder && activeDiscoveredProjectRoot) {
+    if (activeProjectId) {
+      url.searchParams.set(projectIdParamKey, activeProjectId);
+      url.searchParams.delete(sessionFolderParamKey);
+      url.searchParams.delete(discoveredProjectNameParamKey);
+      url.searchParams.delete(discoveredProjectRootParamKey);
+    } else if (activeSessionFolder && activeDiscoveredProjectRoot) {
+      url.searchParams.delete(projectIdParamKey);
       url.searchParams.delete(sessionFolderParamKey);
       url.searchParams.set(discoveredProjectNameParamKey, activeSessionFolder);
       url.searchParams.set(discoveredProjectRootParamKey, activeDiscoveredProjectRoot);
     } else if (activeSessionFolder) {
+      url.searchParams.delete(projectIdParamKey);
       url.searchParams.set(sessionFolderParamKey, activeSessionFolder);
       url.searchParams.delete(discoveredProjectNameParamKey);
       url.searchParams.delete(discoveredProjectRootParamKey);
     } else {
+      url.searchParams.delete(projectIdParamKey);
       url.searchParams.delete(sessionFolderParamKey);
       url.searchParams.delete(discoveredProjectNameParamKey);
       url.searchParams.delete(discoveredProjectRootParamKey);
@@ -6307,6 +6321,7 @@
     sessionSearchScope = "summary";
     sessionFilter = normalizeSessionFilterState(null);
     activeSavedSessionFilterId = null;
+    activeProjectId = null;
     activeSessionFolder = null;
     activeDiscoveredProjectRoot = null;
     platformView = "portal";
@@ -6426,7 +6441,7 @@
       void refreshTerminals();
       loading = false;
 
-      if (projectPortalRequested || (!requestedSessionId && !draftSessionRequested && !activeSessionFolder)) {
+      if (projectPortalRequested || (!requestedSessionId && !draftSessionRequested && !activeSessionFolder && !activeProjectId)) {
         platformView = "portal";
         return;
       }
@@ -6446,7 +6461,14 @@
         return;
       }
 
-      const requestedProject = projectByName(activeSessionFolder);
+      const requestedProject = activeProjectId
+        ? portalProjects.find((project) => project.projectId === activeProjectId) ?? null
+        : projectByName(activeSessionFolder);
+      if (requestedProject?.projectId) {
+        activeProjectId = requestedProject.projectId;
+        activeSessionFolder = requestedProject.name;
+        syncSessionListStateInUrl();
+      }
       if (requestedProject?.lastSessionId && (await selectSession(requestedProject.lastSessionId))) {
         return;
       }
@@ -6743,6 +6765,7 @@
       activeProjectName: null,
       selectedSessionId: summaryForSelection?.id ?? null
     })?.project ?? null;
+    activeProjectId = containingProject?.projectId ?? null;
     activeSessionFolder = containingProject?.name ?? null;
     activeDiscoveredProjectRoot = containingProject?.managed === false ? containingProject.rootPath : null;
     activeSavedSessionFilterId = null;
@@ -8610,6 +8633,7 @@
     if (projectName) {
       try {
         project = await ensureManagedProjectRoot(projectName);
+        activeProjectId = project?.projectId ?? null;
         activeSessionFolder = projectName;
       } catch (error) {
         errorText = describeError(error);
@@ -11346,12 +11370,6 @@
       const projectName = normalizeProjectFolderName(projectNameDraft);
       const existingProject = projectByName(projectName);
       const rootPath = projectDirectoryMode === "create" ? buildProjectRootPath(nextPath, projectName) : nextPath;
-      if (projectDirectoryMode === "create") {
-        await api.saveEditableFile(
-          buildProjectManifestPath(rootPath),
-          buildProjectManifest(projectName, rootPath)
-        );
-      }
       const response = existingProject?.projectId
         ? await api.updateProjectV2(existingProject.projectId, {
             rootPath,
@@ -11366,10 +11384,6 @@
       if (!response.project) {
         throw new Error("项目注册成功，但网关未返回项目记录。");
       }
-      await api.saveEditableFile(
-        buildProjectManifestPath(response.project.rootPath),
-        buildProjectManifest(response.project.name, response.project.rootPath, response.project.projectId)
-      );
       updateConfigSessionOrganization({
         knownTags: response.knownTags,
         sessionFolders: response.sessionFolders
@@ -11446,6 +11460,7 @@
   }
 
   function openProjectSettings(folder: SessionFolder) {
+    activeProjectId = folder.projectId ?? null;
     activeSessionFolder = folder.name;
     projectTabOpen = true;
     activeWorkspaceTabId = "project";
@@ -11872,6 +11887,7 @@
       (config?.sessionOrganization.sessionFolders ?? []).some((folder) => folder.name === sessionFilter.tags[0])
         ? sessionFilter.tags[0]
         : null;
+    activeProjectId = managedProjectByName(activeSessionFolder)?.projectId ?? null;
     activeDiscoveredProjectRoot = null;
     activeSavedSessionFilterId = null;
     syncSessionListStateInUrl();
@@ -11881,6 +11897,7 @@
   function applySavedSessionFilter(filter: SavedSessionFilter | null) {
     sessionFilter = normalizeSessionFilterState(filter);
     activeSavedSessionFilterId = filter?.id ?? null;
+    activeProjectId = null;
     activeSessionFolder = null;
     activeDiscoveredProjectRoot = null;
     syncSessionListStateInUrl();
@@ -11946,10 +11963,6 @@
 
     const projectName = normalizeProjectFolderName(folderName);
     const rootPath = existingProject?.rootPath ?? buildProjectRootPath(config.defaults.cwd, projectName);
-    await api.saveEditableFile(
-      buildProjectManifestPath(rootPath),
-      buildProjectManifest(projectName, rootPath)
-    );
     const response = existingProject?.projectId
       ? await api.updateProjectV2(existingProject.projectId, {
           rootPath,
@@ -11960,10 +11973,6 @@
     if (!response.project) {
       throw new Error("项目注册成功，但网关未返回项目记录。");
     }
-    await api.saveEditableFile(
-      buildProjectManifestPath(response.project.rootPath),
-      buildProjectManifest(response.project.name, response.project.rootPath, response.project.projectId)
-    );
     updateConfigSessionOrganization({
       knownTags: response.knownTags,
       sessionFolders: response.sessionFolders
@@ -12011,6 +12020,7 @@
     enterpriseSettingsMode = false;
     settingsTabOpen = false;
     platformView = "portal";
+    activeProjectId = null;
     activeSessionFolder = null;
     activeDiscoveredProjectRoot = null;
     activeSavedSessionFilterId = null;
@@ -12061,10 +12071,12 @@
     platformView = "project";
     syncPlatformViewInUrl("project");
     if (managedProjectByName(project.name)) {
+      activeProjectId = project.projectId ?? null;
       await openSessionFolder(project.name);
       return;
     }
 
+    activeProjectId = null;
     activeSessionFolder = null;
     activeDiscoveredProjectRoot = null;
     activeSavedSessionFilterId = null;
@@ -12144,13 +12156,6 @@
       updateConfigProjectRegistry(created.projectRegistry);
       const projectId = created.project?.projectId ?? created.imported?.[0]?.projectId ?? null;
       if (projectId) {
-        const registeredProject = created.projectRegistry.projects.find((entry) => entry.projectId === projectId);
-        if (registeredProject) {
-          await api.saveEditableFile(
-            buildProjectManifestPath(registeredProject.rootPath),
-            buildProjectManifest(registeredProject.name, registeredProject.rootPath, registeredProject.projectId)
-          );
-        }
         for (const session of projectSessions.filter((session) => !created.projectRegistry.projects
           .find((entry) => entry.projectId === projectId)?.conversationIds.includes(session.id))) {
           const response = await api.attachProjectConversationV2(projectId, session.id);
@@ -12196,6 +12201,7 @@
     platformView = "project";
     syncPlatformViewInUrl("project");
     activeSessionFolder = folderName;
+    activeProjectId = managedProjectByName(folderName)?.projectId ?? null;
     activeDiscoveredProjectRoot = null;
     activeSavedSessionFilterId = null;
     sessionFilter = normalizeSessionFilterState({
@@ -12265,6 +12271,7 @@
   function openUnfiledSessions() {
     platformView = "project";
     syncPlatformViewInUrl("project");
+    activeProjectId = null;
     activeSessionFolder = null;
     activeSavedSessionFilterId = null;
     sessionFilter = normalizeSessionFilterState({
@@ -12382,6 +12389,7 @@
     if (!renamedProject) {
       throw new Error("项目已更新，但网关未返回项目记录。");
     }
+    activeProjectId = renamedProject.projectId;
     activeSessionFolder = renamedProject.name;
     sessionFilter = normalizeSessionFilterState({
       ...sessionFilter,
@@ -12404,6 +12412,7 @@
       sessionFolders: response.sessionFolders
     });
     updateConfigProjectRegistry(response.projectRegistry);
+    activeProjectId = null;
     activeSessionFolder = null;
     activeDiscoveredProjectRoot = null;
     sessionFilter = normalizeSessionFilterState({
@@ -12470,6 +12479,7 @@
           ? m.session_folder_added_notice({ name: folderName })
           : m.session_folder_removed_notice({ name: folderName });
         if (inFolder) {
+          activeProjectId = project.projectId;
           activeSessionFolder = folderName;
         }
         return;

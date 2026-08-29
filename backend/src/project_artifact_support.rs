@@ -7,6 +7,7 @@ mod tests;
 
 const ARTIFACT_SIGNATURE_CONTEXT: &str = "forgeos-project-artifact-v2";
 const LEGACY_ARTIFACT_SIGNATURE_CONTEXT: &str = "forgeos-project-artifact-v1";
+const ARTIFACT_METADATA_MAX_BYTES: u64 = 64 * 1024;
 
 fn project_artifact_key(project_id: &str) -> String {
     Sha256::digest(project_id.trim().as_bytes())
@@ -35,6 +36,22 @@ fn sanitize_project_artifact_name(name: &str) -> String {
     }
 }
 
+fn stored_artifact_path(root: &Path, stored_name: &str) -> ApiResult<PathBuf> {
+    if matches!(stored_name, "." | "..")
+        || stored_name.is_empty()
+        || stored_name.len() > 255
+        || !stored_name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "Stored artifact name is invalid.",
+        ));
+    }
+    Ok(root.join(stored_name))
+}
+
 pub(crate) fn project_artifact_root(
     state: &AppState,
     profile_id: &str,
@@ -46,12 +63,46 @@ pub(crate) fn project_artifact_root(
         .join(project_artifact_key(project_id))
 }
 
+async fn read_artifact_signing_key(path: &Path) -> ApiResult<Option<Vec<u8>>> {
+    let metadata = match tokio_fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Artifact signing key must be a regular file.",
+        ));
+    }
+    let bytes = tokio_fs::read(path)
+        .await
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if bytes.len() < 32 {
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Artifact signing key is truncated.",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio_fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    }
+    Ok(Some(bytes))
+}
+
 pub(crate) async fn artifact_signing_key(state: &AppState, profile_id: &str) -> ApiResult<Vec<u8>> {
     let profile = resolve_runtime_profile(&state.config, profile_id);
     let key_path = profile.data_dir.join("artifact-signing.key");
-    if let Ok(bytes) = tokio_fs::read(&key_path).await
-        && bytes.len() >= 32
-    {
+    if let Some(bytes) = read_artifact_signing_key(&key_path).await? {
         return Ok(bytes);
     }
     tokio_fs::create_dir_all(&profile.data_dir)
@@ -62,16 +113,47 @@ pub(crate) async fn artifact_signing_key(state: &AppState, profile_id: &str) -> 
     let temporary_path = profile
         .data_dir
         .join(format!(".artifact-signing-{}.tmp", Uuid::new_v4()));
-    tokio_fs::write(&temporary_path, &key)
+    let mut options = tokio_fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut temporary_file = options
+        .open(&temporary_path)
         .await
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    match tokio_fs::rename(&temporary_path, &key_path).await {
-        Ok(()) => Ok(key),
-        Err(_) => {
+    let write_result = async {
+        temporary_file.write_all(&key).await?;
+        temporary_file.sync_all().await
+    }
+    .await;
+    drop(temporary_file);
+    if let Err(error) = write_result {
+        let _ = tokio_fs::remove_file(&temporary_path).await;
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error.to_string(),
+        ));
+    }
+    match tokio_fs::hard_link(&temporary_path, &key_path).await {
+        Ok(()) => {
             let _ = tokio_fs::remove_file(&temporary_path).await;
-            tokio_fs::read(&key_path)
-                .await
-                .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+            Ok(key)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = tokio_fs::remove_file(&temporary_path).await;
+            read_artifact_signing_key(&key_path).await?.ok_or_else(|| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Artifact signing key disappeared during initialization.",
+                )
+            })
+        }
+        Err(error) => {
+            let _ = tokio_fs::remove_file(&temporary_path).await;
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            ));
         }
     }
 }
@@ -170,7 +252,7 @@ async fn write_project_artifact_file(path: &Path, bytes: &[u8]) -> ApiResult<()>
     tokio_fs::write(&temporary_path, bytes)
         .await
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    tokio_fs::rename(&temporary_path, path)
+    replace_file_atomically(&temporary_path, path)
         .await
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(())
@@ -190,6 +272,23 @@ async fn read_project_artifact_metadata(
     }
     let metadata_path =
         project_artifact_root(state, profile_id, project_id).join(format!("{artifact_id}.json"));
+    let metadata = tokio_fs::symlink_metadata(&metadata_path)
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                api_error(StatusCode::NOT_FOUND, "Project artifact was not found.")
+            }
+            _ => api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > ARTIFACT_METADATA_MAX_BYTES
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "Project artifact metadata must be a bounded regular file.",
+        ));
+    }
     let bytes = tokio_fs::read(metadata_path)
         .await
         .map_err(|error| match error.kind() {
@@ -202,7 +301,7 @@ async fn read_project_artifact_metadata(
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
 }
 
-async fn verify_project_artifact(
+pub(crate) async fn verify_project_artifact(
     state: &AppState,
     profile_id: &str,
     project_id: &str,
@@ -219,7 +318,10 @@ async fn verify_project_artifact(
                 "Artifact metadata is invalid.",
             )
         })?;
-    let file_path = project_artifact_root(state, profile_id, project_id).join(stored_name);
+    let file_path = stored_artifact_path(
+        &project_artifact_root(state, profile_id, project_id),
+        stored_name,
+    )?;
     let bytes = tokio_fs::read(&file_path)
         .await
         .map_err(|error| api_error(StatusCode::NOT_FOUND, error.to_string()))?;
@@ -279,7 +381,7 @@ pub(crate) async fn migrate_legacy_project_artifacts(
             .and_then(Value::as_str)
             .ok_or_else(|| api_error(StatusCode::CONFLICT, "Legacy artifact metadata is invalid."))?
             .to_string();
-        let bytes = tokio_fs::read(legacy_root.join(&stored_name))
+        let bytes = tokio_fs::read(stored_artifact_path(&legacy_root, &stored_name)?)
             .await
             .map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
         let actual_digest = Sha256::digest(&bytes)
@@ -336,7 +438,8 @@ pub(crate) async fn migrate_legacy_project_artifacts(
         metadata["signature"] = json!(signature);
         metadata["signatureAlgorithm"] = json!("hmac-sha256");
         metadata["signatureVerified"] = json!(true);
-        write_project_artifact_file(&target_root.join(&stored_name), &bytes).await?;
+        write_project_artifact_file(&stored_artifact_path(&target_root, &stored_name)?, &bytes)
+            .await?;
         write_project_artifact_file(
             &target_root.join(format!("{artifact_id}.json")),
             &serde_json::to_vec_pretty(&metadata)
@@ -356,10 +459,10 @@ pub(crate) async fn handle_project_artifacts_api_http(
     auth: AuthContext,
     route_path: &str,
 ) -> Response {
+    if !role_has_admin_access(auth.role) {
+        return json_error(StatusCode::FORBIDDEN, "This action requires an admin role.");
+    }
     if route_path == "/api/project-artifacts" && request.method() == Method::POST {
-        if !role_has_admin_access(auth.role) {
-            return json_error(StatusCode::FORBIDDEN, "This action requires an admin role.");
-        }
         if request
             .headers()
             .get(header::CONTENT_LENGTH)

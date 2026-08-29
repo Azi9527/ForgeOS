@@ -26,10 +26,15 @@
   function methodLabel(method: string) {
     const labels: Record<string, string> = {
       "projectLifecycle/validation/save": "更新验证方案",
-      "projectLifecycle/validation/record": "记录验证证据",
+      "projectLifecycle/validation/run": "网关执行项目验证",
+      "projectLifecycle/validation/cancel": "停止项目验证",
       "projectLifecycle/governance/save": "更新项目治理策略",
       "projectLifecycle/release/save": "变更发布状态",
-      "projectLifecycle/operations/save": "变更环境或部署状态",
+      "projectLifecycle/operations/save": "变更环境配置",
+      "projectLifecycle/deployment/run": "网关执行部署",
+      "projectLifecycle/environment/check": "网关执行健康检查",
+      "projectLifecycle/operations/recover": "恢复中断的运维执行",
+      "projectLifecycle/validation/recover": "恢复中断的验证执行",
       "projectArtifacts/upload": "上传并签名制品"
     };
     return labels[method] ?? method;

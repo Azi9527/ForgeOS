@@ -49,7 +49,6 @@ import type {
   PromptPreset,
   ProjectArtifact,
   ProjectAuditEntry,
-  ProjectDeployment,
   ProjectEnvironment,
   ProjectGovernance,
   ProjectLifecycleMigrationPayload,
@@ -60,7 +59,6 @@ import type {
   ProjectRegistryPayload,
   ProjectRelease,
   ProjectValidationCheck,
-  ProjectValidationRun,
   SavedSessionFilter,
   SelectedSkill,
   SessionDetailPayload,
@@ -193,6 +191,7 @@ async function downloadRequest(input: string) {
 }
 
 const ws = new WebSocketRpcClient();
+const PROJECT_OPERATION_TIMEOUT_MS = 31 * 60 * 1000;
 
 export const api = {
   getAuthSession() {
@@ -1146,8 +1145,16 @@ export const api = {
     return ws.request<ProjectLifecyclePayload>("projectLifecycle/validation/save", { projectId, checks, revision });
   },
 
-  recordProjectValidation(projectId: string, run: ProjectValidationRun, revision: number | null = null) {
-    return ws.request<ProjectLifecyclePayload>("projectLifecycle/validation/record", { projectId, run, revision });
+  runProjectValidation(projectId: string, expectedRevision: number) {
+    return ws.request<ProjectLifecyclePayload>(
+      "projectLifecycle/validation/run",
+      { projectId, expectedRevision },
+      PROJECT_OPERATION_TIMEOUT_MS
+    );
+  },
+
+  cancelProjectValidation(projectId: string) {
+    return ws.request<{ ok: true; projectId: string; runId: string }>("projectLifecycle/validation/cancel", { projectId });
   },
 
   saveProjectGovernance(projectId: string, governance: ProjectGovernance, revision: number | null = null) {
@@ -1185,8 +1192,24 @@ export const api = {
     return ws.request<{ projectId: string; entries: ProjectAuditEntry[] }>("projectLifecycle/audit/list", { projectId, limit });
   },
 
-  saveProjectOperations(projectId: string, environments: ProjectEnvironment[], deployments: ProjectDeployment[], revision: number | null = null) {
-    return ws.request<ProjectLifecyclePayload>("projectLifecycle/operations/save", { projectId, environments, deployments, revision });
+  saveProjectOperations(projectId: string, environments: ProjectEnvironment[], revision: number | null = null) {
+    return ws.request<ProjectLifecyclePayload>("projectLifecycle/operations/save", { projectId, environments, revision });
+  },
+
+  runProjectDeployment(projectId: string, releaseId: string, environmentId: string, expectedRevision: number) {
+    return ws.request<ProjectLifecyclePayload>(
+      "projectLifecycle/deployment/run",
+      { projectId, releaseId, environmentId, expectedRevision },
+      PROJECT_OPERATION_TIMEOUT_MS
+    );
+  },
+
+  checkProjectEnvironment(projectId: string, environmentId: string, expectedRevision: number) {
+    return ws.request<ProjectLifecyclePayload>(
+      "projectLifecycle/environment/check",
+      { projectId, environmentId, expectedRevision },
+      PROJECT_OPERATION_TIMEOUT_MS
+    );
   },
 
   getGitWorktrees(repoPath: string) {

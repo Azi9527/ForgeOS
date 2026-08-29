@@ -625,8 +625,70 @@ pub(crate) async fn terminate_child_process_group(child: &mut Child, _child_pid:
             .status()
             .await;
     }
+    #[cfg(windows)]
+    if let Some(pid) = _child_pid {
+        let pid = pid.to_string();
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
     let _ = child.kill().await;
     let _ = child.wait().await;
+}
+
+#[cfg(windows)]
+pub(crate) async fn replace_file_atomically(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        // SAFETY: both buffers are owned, NUL-terminated UTF-16 paths and remain alive for the
+        // duration of the synchronous Win32 call.
+        let moved = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn replace_file_atomically(source: &Path, target: &Path) -> std::io::Result<()> {
+    tokio_fs::rename(source, target).await
 }
 
 pub(crate) async fn read_child_pipe_limited<R>(mut reader: R, label: &str) -> Result<Vec<u8>>

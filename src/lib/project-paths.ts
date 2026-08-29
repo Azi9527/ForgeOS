@@ -33,19 +33,11 @@ export function buildProjectRootPath(parentPath: string, projectName: string) {
 }
 
 export function normalizeProjectRootPath(value: string | null | undefined) {
-  const normalized = value?.trim().replace(/^\\\\\?\\/u, "").replace(/[\\/]+$/u, "").toLocaleLowerCase() ?? "";
-  return normalized || null;
-}
-
-export function buildProjectManifestPath(rootPath: string) {
-  const separator = rootPath.includes("\\") ? "\\" : "/";
-  return `${rootPath.replace(/[\\/]+$/u, "")}${separator}.forgeos${separator}project.json`;
-}
-
-export function buildProjectManifest(name: string, rootPath: string, projectId: string | null = null) {
-  const normalizedName = normalizeProjectFolderName(name);
-  const manifest = projectId
-    ? { schemaVersion: 2, projectId, name: normalizedName, rootPath }
-    : { schemaVersion: 1, name: normalizedName, rootPath };
-  return `${JSON.stringify(manifest, null, 2)}\n`;
+  const raw = value?.trim() ?? "";
+  if (!raw) {
+    return null;
+  }
+  const windowsPath = /^[a-z]:[\\/]/iu.test(raw) || /^\\\\/u.test(raw);
+  const normalized = raw.replace(/^\\\\\?\\/u, "").replace(/[\\/]+$/u, "");
+  return windowsPath ? normalized.toLocaleLowerCase() : normalized;
 }
