@@ -117,6 +117,32 @@ fn project_import_commit_rejects_an_incomplete_conversation_discovery() {
 }
 
 #[test]
+fn project_import_limit_distinguishes_a_complete_last_page_from_truncation() {
+    let mut complete = vec![json!({ "id": "existing" }); PROJECT_IMPORT_SESSION_LIMIT - 1];
+    assert!(!append_migration_session_page(
+        &mut complete,
+        vec![json!({ "id": "last" })],
+        false,
+    ));
+    assert_eq!(complete.len(), PROJECT_IMPORT_SESSION_LIMIT);
+
+    let mut paginated = vec![json!({ "id": "existing" }); PROJECT_IMPORT_SESSION_LIMIT - 1];
+    assert!(append_migration_session_page(
+        &mut paginated,
+        vec![json!({ "id": "last" })],
+        true,
+    ));
+
+    let mut overflowing = vec![json!({ "id": "existing" }); PROJECT_IMPORT_SESSION_LIMIT - 1];
+    assert!(append_migration_session_page(
+        &mut overflowing,
+        vec![json!({ "id": "last" }), json!({ "id": "overflow" })],
+        false,
+    ));
+    assert_eq!(overflowing.len(), PROJECT_IMPORT_SESSION_LIMIT);
+}
+
+#[test]
 fn deterministic_import_id_survives_retries() {
     assert_eq!(
         stable_project_id("default", "folder:aps"),

@@ -996,7 +996,7 @@ fn migration_candidates(ui_state: &Value, sessions: &[Value]) -> Vec<Value> {
 async fn migration_sessions(state: &AppState, profile_id: &str) -> (Vec<Value>, Vec<String>) {
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
-    for archived in [false, true] {
+    'archive_scope: for archived in [false, true] {
         let mut cursor = None;
         loop {
             match list_sessions_payload(
@@ -1010,21 +1010,23 @@ async fn migration_sessions(state: &AppState, profile_id: &str) -> (Vec<Value>, 
             .await
             {
                 Ok(payload) => {
-                    sessions.extend(
-                        payload
-                            .get("sessions")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
-                    cursor = payload
+                    let page = payload
+                        .get("sessions")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let next_cursor = payload
                         .get("nextCursor")
                         .and_then(Value::as_str)
                         .map(str::to_string);
-                    if cursor.is_none() || sessions.len() >= PROJECT_IMPORT_SESSION_LIMIT {
-                        if sessions.len() >= PROJECT_IMPORT_SESSION_LIMIT {
-                            warnings.push(format!("Conversation discovery was capped at {PROJECT_IMPORT_SESSION_LIMIT} records."));
-                        }
+                    if append_migration_session_page(&mut sessions, page, next_cursor.is_some()) {
+                        warnings.push(format!(
+                            "Conversation discovery was capped at {PROJECT_IMPORT_SESSION_LIMIT} records."
+                        ));
+                        break 'archive_scope;
+                    }
+                    cursor = next_cursor;
+                    if cursor.is_none() {
                         break;
                     }
                 }
@@ -1047,6 +1049,17 @@ async fn migration_sessions(state: &AppState, profile_id: &str) -> (Vec<Value>, 
         left.get("id").and_then(Value::as_str) == right.get("id").and_then(Value::as_str)
     });
     (sessions, warnings)
+}
+
+fn append_migration_session_page(
+    sessions: &mut Vec<Value>,
+    page: Vec<Value>,
+    has_next_page: bool,
+) -> bool {
+    let remaining = PROJECT_IMPORT_SESSION_LIMIT.saturating_sub(sessions.len());
+    let page_was_truncated = page.len() > remaining;
+    sessions.extend(page.into_iter().take(remaining));
+    page_was_truncated || (sessions.len() >= PROJECT_IMPORT_SESSION_LIMIT && has_next_page)
 }
 
 pub(crate) async fn preview_project_import_v2_payload(
