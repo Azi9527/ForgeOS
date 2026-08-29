@@ -53,6 +53,10 @@ import type {
   ProjectEnvironment,
   ProjectGovernance,
   ProjectLifecyclePayload,
+  ProjectMigrationPreview,
+  ProjectRecordV2,
+  ProjectRegistryMutationPayload,
+  ProjectRegistryPayload,
   ProjectRelease,
   ProjectValidationCheck,
   ProjectValidationRun,
@@ -888,6 +892,71 @@ export const api = {
       knownTags: string[];
       sessionFolders: AppConfigPayload["sessionOrganization"]["sessionFolders"];
     }>("sessionFolders/rename", { name, nextName });
+  },
+
+  listProjectsV2(includeArchived = false, cursor: string | null = null, limit = 100) {
+    return ws.request<ProjectRegistryPayload>("project/list", { includeArchived, cursor, limit });
+  },
+
+  getProjectV2(projectId: string) {
+    return ws.request<{ project: ProjectRecordV2 }>("project/get", { projectId });
+  },
+
+  createProjectV2(payload: {
+    name: string;
+    rootPath: string;
+    repositoryRoot?: string | null;
+    source?: "created" | "imported";
+  }) {
+    return ws.request<ProjectRegistryMutationPayload>("project/create", payload);
+  },
+
+  updateProjectV2(
+    projectId: string,
+    patch: Partial<{
+      name: string;
+      rootPath: string;
+      repositoryRoot: string | null;
+      pinned: boolean;
+      lastConversationId: string | null;
+      markOpened: boolean;
+      revision: number;
+      settings: { model: string | null };
+    }>
+  ) {
+    return ws.request<ProjectRegistryMutationPayload>("project/update", { projectId, ...patch });
+  },
+
+  archiveProjectV2(projectId: string) {
+    return ws.request<ProjectRegistryMutationPayload>("project/archive", { projectId });
+  },
+
+  previewProjectImportV2() {
+    return ws.request<ProjectMigrationPreview>("project/import/preview");
+  },
+
+  commitProjectImportV2(candidateKeys: string[]) {
+    return ws.request<ProjectRegistryMutationPayload>("project/import/commit", { candidateKeys });
+  },
+
+  listProjectConversationsV2(projectId: string) {
+    return ws.request<{ projectId: string; conversationIds: string[] }>("project/conversation/list", {
+      projectId
+    });
+  },
+
+  attachProjectConversationV2(projectId: string, conversationId: string) {
+    return ws.request<ProjectRegistryMutationPayload>("project/conversation/attach", {
+      projectId,
+      conversationId
+    });
+  },
+
+  detachProjectConversationV2(projectId: string, conversationId: string) {
+    return ws.request<ProjectRegistryMutationPayload & { detached: boolean; conversationId: string }>(
+      "project/conversation/detach",
+      { projectId, conversationId }
+    );
   },
 
   saveSessionFilter(filter: SavedSessionFilter) {

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildProjectManifestPath,
+  buildProjectManifest,
   buildProjectRootPath,
   normalizeProjectFolderName,
   normalizeProjectRootPath
@@ -30,4 +31,13 @@ test("project roots match across Windows casing and extended path prefixes", () 
   assert.equal(normalizeProjectRootPath("\\\\?\\D:\\codex\\APS\\"), "d:\\codex\\aps");
   assert.equal(normalizeProjectRootPath("D:\\CODEX\\aps"), "d:\\codex\\aps");
   assert.equal(normalizeProjectRootPath("  "), null);
+});
+
+test("a registered project manifest persists its stable V2 identity", () => {
+  assert.deepEqual(JSON.parse(buildProjectManifest("APS", "D:\\codex\\APS", "prj_aps")), {
+    schemaVersion: 2,
+    projectId: "prj_aps",
+    name: "APS",
+    rootPath: "D:\\codex\\APS"
+  });
 });

@@ -1691,6 +1691,19 @@
     upsertSessionSummary(created);
     if (activeSessionFolder) {
       try {
+        const project = managedProjectByName(activeSessionFolder);
+        if (project?.projectId) {
+          const response = await api.attachProjectConversationV2(project.projectId, created.id);
+          upsertSessionSummary({
+            ...created,
+            tags: [...new Set([...created.tags, activeSessionFolder])]
+          });
+          updateConfigSessionOrganization({
+            knownTags: response.knownTags,
+            sessionFolders: response.sessionFolders
+          });
+          updateConfigProjectRegistry(response.projectRegistry);
+        } else {
         const response = await api.updateSessionOrganization(
           created.id,
           {
@@ -1707,6 +1720,7 @@
           knownTags: response.knownTags,
           sessionFolders: response.sessionFolders
         });
+        }
       } catch (error) {
         errorText = describeError(error);
       }
@@ -2403,19 +2417,48 @@
       null
   );
   const portalProjects = $derived.by(() => {
-    const managedProjects = (config?.sessionOrganization.sessionFolders ?? []).map((project) => ({
-      ...project,
-      managed: true
-    }));
-    const managedRoots = new Set(
-      managedProjects
+    const registryProjects = config?.projectRegistry?.projects ?? [];
+    const managedProjects: SessionFolder[] = registryProjects
+      .filter((project) => project.status === "active")
+      .map((project) => ({
+        projectId: project.projectId,
+        revision: project.revision,
+        status: project.status,
+        conversationIds: project.conversationIds,
+        name: project.name,
+        managed: true,
+        pinned: project.pinned,
+        sessionCount: project.conversationCount,
+        rootPath: project.rootPath,
+        repoPath: project.repositoryRoot,
+        lastSessionId: project.lastConversationId,
+        lastOpenedAt: project.lastOpenedAt,
+        settings: project.settings,
+        createdAt: project.createdAt,
+        updatedAt: project.updatedAt
+      }));
+    const registryRoots = new Set(
+      registryProjects
         .map((project) => normalizeProjectRootPath(project.rootPath))
         .filter((root): root is string => Boolean(root))
     );
+    const registryNames = new Set(registryProjects.map((project) => project.name.toLocaleLowerCase()));
+    const legacyProjects = (config?.sessionOrganization.sessionFolders ?? [])
+      .filter((project) => {
+        const root = normalizeProjectRootPath(project.rootPath);
+        return !project.projectId && !registryNames.has(project.name.toLocaleLowerCase()) && (!root || !registryRoots.has(root));
+      })
+      .map((project) => ({ ...project, managed: false }));
+    const claimedRoots = new Set([
+      ...registryRoots,
+      ...legacyProjects
+        .map((project) => normalizeProjectRootPath(project.rootPath))
+        .filter((root): root is string => Boolean(root))
+    ]);
     const discoveredByRoot = new Map<string, SessionSummary[]>();
     for (const session of sessions) {
       const root = normalizeProjectRootPath(session.cwd);
-      if (!root || managedRoots.has(root)) {
+      if (!root || claimedRoots.has(root)) {
         continue;
       }
       const group = discoveredByRoot.get(root) ?? [];
@@ -2423,7 +2466,7 @@
       discoveredByRoot.set(root, group);
     }
 
-    const usedNames = new Set(managedProjects.map((project) => project.name.toLocaleLowerCase()));
+    const usedNames = new Set([...managedProjects, ...legacyProjects].map((project) => project.name.toLocaleLowerCase()));
     const discoveredProjects: SessionFolder[] = [];
     for (const groupedSessions of discoveredByRoot.values()) {
       const ordered = [...groupedSessions].sort((left, right) => right.updatedAt - left.updatedAt);
@@ -2454,7 +2497,7 @@
         updatedAt: latest.updatedAt
       });
     }
-    return [...managedProjects, ...discoveredProjects];
+    return [...managedProjects, ...legacyProjects, ...discoveredProjects];
   });
   const activeProjectContext = $derived.by(() =>
     resolveProjectContext({
@@ -4256,6 +4299,16 @@
         ...config.sessionOrganization,
         ...patch
       }
+    };
+  }
+
+  function updateConfigProjectRegistry(projectRegistry: AppConfigPayload["projectRegistry"]) {
+    if (!config) {
+      return;
+    }
+    config = {
+      ...config,
+      projectRegistry
     };
   }
 
@@ -8179,6 +8232,8 @@
                 ...(event.params.sessionOrganization as Partial<AppConfigPayload["sessionOrganization"]>)
               }
             : config.sessionOrganization,
+          projectRegistry:
+            (event.params.projectRegistry as AppConfigPayload["projectRegistry"] | undefined) ?? config.projectRegistry,
           promptPresets: Array.isArray(event.params.promptPresets)
             ? (event.params.promptPresets as PromptPreset[])
             : config.promptPresets,
@@ -11297,21 +11352,35 @@
           buildProjectManifest(projectName, rootPath)
         );
       }
-      const response = await api.upsertSessionFolder(projectName, existingProject?.pinned ?? false, {
-        rootPath,
-        markOpened: true,
-        settings: existingProject?.settings ?? { model: null }
-      });
+      const response = existingProject?.projectId
+        ? await api.updateProjectV2(existingProject.projectId, {
+            rootPath,
+            markOpened: true,
+            revision: existingProject.revision ?? undefined
+          })
+        : await api.createProjectV2({
+            name: projectName,
+            rootPath,
+            source: existingProject ? "imported" : "created"
+          });
+      if (!response.project) {
+        throw new Error("项目注册成功，但网关未返回项目记录。");
+      }
+      await api.saveEditableFile(
+        buildProjectManifestPath(response.project.rootPath),
+        buildProjectManifest(response.project.name, response.project.rootPath, response.project.projectId)
+      );
       updateConfigSessionOrganization({
         knownTags: response.knownTags,
         sessionFolders: response.sessionFolders
       });
+      updateConfigProjectRegistry(response.projectRegistry);
       browserOpen = false;
       browserPurpose = "session";
       projectDirectoryMode = "create";
       projectNameDraft = "";
-      await openSessionFolder(response.folder.name);
-      noticeText = m.session_folder_created_notice({ name: response.folder.name });
+      await openSessionFolder(response.project.name);
+      noticeText = m.session_folder_created_notice({ name: response.project.name });
     } catch (error) {
       errorText = describeError(error);
     }
@@ -11822,7 +11891,7 @@
     if (!folderName) {
       return null;
     }
-    return config?.sessionOrganization.sessionFolders.find((folder) => folder.name === folderName) ?? null;
+    return portalProjects.find((project) => project.name === folderName && project.managed !== false) ?? null;
   }
 
   function projectByName(folderName: string | null) {
@@ -11837,6 +11906,12 @@
       return activeSessionFolder;
     }
     const selectedSession = selectedSessionId ? sessions.find((session) => session.id === selectedSessionId) : null;
+    const boundProject = selectedSession
+      ? portalProjects.find((project) => project.projectId && project.conversationIds?.includes(selectedSession.id)) ?? null
+      : null;
+    if (boundProject) {
+      return boundProject.name;
+    }
     return selectedSession?.tags.find((tag) => Boolean(managedProjectByName(tag))) ?? null;
   }
 
@@ -11862,7 +11937,7 @@
 
   async function ensureManagedProjectRoot(folderName: string) {
     const existingProject = managedProjectByName(folderName) ?? projectByName(folderName);
-    if (existingProject?.rootPath) {
+    if (existingProject?.projectId && existingProject.rootPath) {
       return existingProject;
     }
     if (!config) {
@@ -11870,24 +11945,34 @@
     }
 
     const projectName = normalizeProjectFolderName(folderName);
-    const rootPath = buildProjectRootPath(config.defaults.cwd, projectName);
+    const rootPath = existingProject?.rootPath ?? buildProjectRootPath(config.defaults.cwd, projectName);
     await api.saveEditableFile(
       buildProjectManifestPath(rootPath),
       buildProjectManifest(projectName, rootPath)
     );
-    const response = await api.upsertSessionFolder(projectName, existingProject?.pinned ?? false, {
-      rootPath,
-      markOpened: true,
-      settings: existingProject?.settings ?? { model: null }
-    });
+    const response = existingProject?.projectId
+      ? await api.updateProjectV2(existingProject.projectId, {
+          rootPath,
+          markOpened: true,
+          revision: existingProject.revision ?? undefined
+        })
+      : await api.createProjectV2({ name: projectName, rootPath, source: existingProject ? "imported" : "created" });
+    if (!response.project) {
+      throw new Error("项目注册成功，但网关未返回项目记录。");
+    }
+    await api.saveEditableFile(
+      buildProjectManifestPath(response.project.rootPath),
+      buildProjectManifest(response.project.name, response.project.rootPath, response.project.projectId)
+    );
     updateConfigSessionOrganization({
       knownTags: response.knownTags,
       sessionFolders: response.sessionFolders
     });
+    updateConfigProjectRegistry(response.projectRegistry);
     noticeText = $activeLocale === "zh-Hans"
       ? `已为“${projectName}”建立独立项目目录：${rootPath}`
       : `Created a dedicated project folder for ${projectName}: ${rootPath}`;
-    return response.folder;
+    return projectByName(response.project.name);
   }
 
   function projectSectionForWorkspaceTab(): ProjectSection {
@@ -12038,26 +12123,43 @@
     const projectRoot = normalizeProjectRootPath(project.rootPath);
     const projectSessions = sessions.filter((session) => normalizeProjectRootPath(session.cwd) === projectRoot);
     try {
-      const created = await api.upsertSessionFolder(project.name, project.pinned, {
-        rootPath: project.rootPath,
-        lastSessionId: project.lastSessionId,
-        markOpened: true,
-        settings: project.settings ?? { model: null }
-      });
+      const preview = await api.previewProjectImportV2();
+      const candidate = preview.candidates.find(
+        (entry) =>
+          entry.status === "ready" &&
+          normalizeProjectRootPath(entry.rootPath) === projectRoot
+      );
+      const created = candidate
+        ? await api.commitProjectImportV2([candidate.candidateKey])
+        : await api.createProjectV2({
+            name: project.name,
+            rootPath: project.rootPath,
+            repositoryRoot: project.repoPath,
+            source: "imported"
+          });
       updateConfigSessionOrganization({
         knownTags: created.knownTags,
         sessionFolders: created.sessionFolders
       });
-      for (const session of projectSessions) {
-        const response = await api.updateSessionOrganization(
-          session.id,
-          { tags: [...new Set([...session.tags, project.name])] },
-          session.profileId ?? null
-        );
-        updateConfigSessionOrganization({
-          knownTags: response.knownTags,
-          sessionFolders: response.sessionFolders
-        });
+      updateConfigProjectRegistry(created.projectRegistry);
+      const projectId = created.project?.projectId ?? created.imported?.[0]?.projectId ?? null;
+      if (projectId) {
+        const registeredProject = created.projectRegistry.projects.find((entry) => entry.projectId === projectId);
+        if (registeredProject) {
+          await api.saveEditableFile(
+            buildProjectManifestPath(registeredProject.rootPath),
+            buildProjectManifest(registeredProject.name, registeredProject.rootPath, registeredProject.projectId)
+          );
+        }
+        for (const session of projectSessions.filter((session) => !created.projectRegistry.projects
+          .find((entry) => entry.projectId === projectId)?.conversationIds.includes(session.id))) {
+          const response = await api.attachProjectConversationV2(projectId, session.id);
+          updateConfigSessionOrganization({
+            knownTags: response.knownTags,
+            sessionFolders: response.sessionFolders
+          });
+          updateConfigProjectRegistry(response.projectRegistry);
+        }
       }
       await refreshSessions();
       noticeText = `“${project.name}”已纳入 ForgeOS 管理，并关联 ${projectSessions.length} 条现有开发对话。`;
@@ -12072,14 +12174,19 @@
       return;
     }
     try {
-      const response = await api.upsertSessionFolder(project.name, null, {
-        lastSessionId: sessionId,
-        markOpened: true
+      if (!project.projectId) {
+        return;
+      }
+      const response = await api.updateProjectV2(project.projectId, {
+        lastConversationId: sessionId,
+        markOpened: true,
+        revision: project.revision ?? undefined
       });
       updateConfigSessionOrganization({
         knownTags: response.knownTags,
         sessionFolders: response.sessionFolders
       });
+      updateConfigProjectRegistry(response.projectRegistry);
     } catch {
       // Remembering the preferred project conversation must not interrupt the active conversation.
     }
@@ -12105,11 +12212,17 @@
 
     let project = projectByName(folderName);
     try {
-      const response = await api.upsertSessionFolder(folderName, null, { markOpened: true });
-      updateConfigSessionOrganization({
-        knownTags: response.knownTags,
-        sessionFolders: response.sessionFolders
-      });
+      if (project?.projectId) {
+        const response = await api.updateProjectV2(project.projectId, {
+          markOpened: true,
+          revision: project.revision ?? undefined
+        });
+        updateConfigSessionOrganization({
+          knownTags: response.knownTags,
+          sessionFolders: response.sessionFolders
+        });
+        updateConfigProjectRegistry(response.projectRegistry);
+      }
       project = await ensureManagedProjectRoot(folderName);
     } catch (error) {
       errorText = describeError(error);
@@ -12179,14 +12292,29 @@
       return;
     }
     try {
-      const response = await api.upsertSessionFolder(folder.name, !folder.pinned);
+      if (!folder.projectId) {
+        const response = await api.upsertSessionFolder(folder.name, !folder.pinned);
+        updateConfigSessionOrganization({
+          knownTags: response.knownTags,
+          sessionFolders: response.sessionFolders
+        });
+        noticeText = response.folder.pinned
+          ? m.session_folder_pinned_notice({ name: response.folder.name })
+          : m.session_folder_unpinned_notice({ name: response.folder.name });
+        return;
+      }
+      const response = await api.updateProjectV2(folder.projectId, {
+        pinned: !folder.pinned,
+        revision: folder.revision ?? undefined
+      });
       updateConfigSessionOrganization({
         knownTags: response.knownTags,
         sessionFolders: response.sessionFolders
       });
-      noticeText = response.folder.pinned
-        ? m.session_folder_pinned_notice({ name: response.folder.name })
-        : m.session_folder_unpinned_notice({ name: response.folder.name });
+      updateConfigProjectRegistry(response.projectRegistry);
+      noticeText = response.project?.pinned
+        ? m.session_folder_pinned_notice({ name: response.project.name })
+        : m.session_folder_unpinned_notice({ name: response.project?.name ?? folder.name });
     } catch (error) {
       errorText = describeError(error);
     }
@@ -12217,13 +12345,18 @@
       throw new Error(m.error_forbidden_role());
     }
     try {
-      const response = await api.upsertSessionFolder(project.name, null, {
-        settings: { model }
+      if (!project.projectId) {
+        throw new Error("请先将该项目纳入 Project Registry V2。");
+      }
+      const response = await api.updateProjectV2(project.projectId, {
+        settings: { model },
+        revision: project.revision ?? undefined
       });
       updateConfigSessionOrganization({
         knownTags: response.knownTags,
         sessionFolders: response.sessionFolders
       });
+      updateConfigProjectRegistry(response.projectRegistry);
       noticeText = $activeLocale === "zh-Hans"
         ? `已保存 ${project.name} 的项目设置。`
         : `Saved settings for ${project.name}.`;
@@ -12233,29 +12366,44 @@
   }
 
   async function renameProject(project: SessionFolder, nextName: string) {
-    const response = await api.renameSessionFolder(project.name, nextName);
+    if (!project.projectId) {
+      throw new Error("请先将该项目纳入 Project Registry V2。");
+    }
+    const response = await api.updateProjectV2(project.projectId, {
+      name: nextName,
+      revision: project.revision ?? undefined
+    });
     updateConfigSessionOrganization({
       knownTags: response.knownTags,
       sessionFolders: response.sessionFolders
     });
-    activeSessionFolder = response.renamed.to;
+    updateConfigProjectRegistry(response.projectRegistry);
+    const renamedProject = response.project;
+    if (!renamedProject) {
+      throw new Error("项目已更新，但网关未返回项目记录。");
+    }
+    activeSessionFolder = renamedProject.name;
     sessionFilter = normalizeSessionFilterState({
       ...sessionFilter,
-      tags: sessionFilter.tags.map((tag) => (tag === response.renamed.from ? response.renamed.to : tag))
+      tags: sessionFilter.tags.map((tag) => (tag === project.name ? renamedProject.name : tag))
     });
     syncSessionListStateInUrl();
     await refreshSessions();
     noticeText = $activeLocale === "zh-Hans"
-      ? `项目已重命名，已迁移 ${response.migratedSessionCount} 条对话。`
-      : `Project renamed and ${response.migratedSessionCount} conversations migrated.`;
+      ? `项目已重命名为“${renamedProject.name}”，稳定项目 ID 保持不变。`
+      : `Project renamed to ${renamedProject.name}; its stable project ID was preserved.`;
   }
 
   async function removeProject(project: SessionFolder) {
-    const response = await api.deleteSessionFolder(project.name, true);
+    if (!project.projectId) {
+      throw new Error("请先将该项目纳入 Project Registry V2。");
+    }
+    const response = await api.archiveProjectV2(project.projectId);
     updateConfigSessionOrganization({
       knownTags: response.knownTags,
       sessionFolders: response.sessionFolders
     });
+    updateConfigProjectRegistry(response.projectRegistry);
     activeSessionFolder = null;
     activeDiscoveredProjectRoot = null;
     sessionFilter = normalizeSessionFilterState({
@@ -12304,6 +12452,28 @@
       ? [...new Set([...nonProjectTags, folderName])]
       : selectedSessionSummary.tags.filter((tag) => tag !== folderName);
     try {
+      const project = managedProjectByName(folderName);
+      if (project?.projectId) {
+        const response = inFolder
+          ? await api.attachProjectConversationV2(project.projectId, selectedSessionId)
+          : await api.detachProjectConversationV2(project.projectId, selectedSessionId);
+        applySessionSummaryUpdate({
+          ...selectedSessionSummary,
+          tags: nextTags
+        });
+        updateConfigSessionOrganization({
+          knownTags: response.knownTags,
+          sessionFolders: response.sessionFolders
+        });
+        updateConfigProjectRegistry(response.projectRegistry);
+        noticeText = inFolder
+          ? m.session_folder_added_notice({ name: folderName })
+          : m.session_folder_removed_notice({ name: folderName });
+        if (inFolder) {
+          activeSessionFolder = folderName;
+        }
+        return;
+      }
       const response = await api.updateSessionOrganization(
         selectedSessionId,
         {

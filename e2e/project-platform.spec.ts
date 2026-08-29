@@ -59,19 +59,22 @@ async function login(page: import("@playwright/test").Page) {
 test("opens a project folder into release and operations workspaces", async ({ page }) => {
   await login(page);
   const projectName = `Enterprise Pilot ${Date.now()}`;
-  const created = await wsRequest(page, "sessionFolders/upsert", {
+  const created = await wsRequest<{
+    project: { projectId: string; name: string };
+  }>(page, "project/create", {
     name: projectName,
-    pinned: true,
     rootPath: process.cwd(),
-    repoPath: process.cwd(),
-    markOpened: true
+    repositoryRoot: process.cwd()
   });
   expect(created.ok, created.error).toBeTruthy();
+  const projectId = created.result?.project.projectId;
+  expect(projectId).toMatch(/^prj_/u);
 
   try {
     await page.reload();
     const card = page.getByTestId("project-folder-card").filter({ hasText: projectName });
     await expect(card).toBeVisible();
+    await expect(card).toHaveAttribute("data-project-id", projectId ?? "");
     await card.getByRole("button", { name: "发布" }).click();
     await expect(page.getByTestId("project-navigation")).toBeVisible();
     await expect(page.getByTestId("project-release-workspace")).toBeVisible();
@@ -93,9 +96,8 @@ test("opens a project folder into release and operations workspaces", async ({ p
     await page.getByRole("button", { name: "项目中心" }).click();
     await expect(page.getByTestId("enterprise-project-portal")).toBeVisible();
   } finally {
-    const removed = await wsRequest(page, "sessionFolders/delete", {
-      name: projectName,
-      removeFromSessions: true
+    const removed = await wsRequest(page, "project/archive", {
+      projectId
     });
     expect(removed.ok, removed.error).toBeTruthy();
   }

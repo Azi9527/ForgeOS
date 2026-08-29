@@ -42,6 +42,10 @@ export function buildProjectManifestPath(rootPath: string) {
   return `${rootPath.replace(/[\\/]+$/u, "")}${separator}.forgeos${separator}project.json`;
 }
 
-export function buildProjectManifest(name: string, rootPath: string) {
-  return `${JSON.stringify({ schemaVersion: 1, name: normalizeProjectFolderName(name), rootPath }, null, 2)}\n`;
+export function buildProjectManifest(name: string, rootPath: string, projectId: string | null = null) {
+  const normalizedName = normalizeProjectFolderName(name);
+  const manifest = projectId
+    ? { schemaVersion: 2, projectId, name: normalizedName, rootPath }
+    : { schemaVersion: 1, name: normalizedName, rootPath };
+  return `${JSON.stringify(manifest, null, 2)}\n`;
 }
