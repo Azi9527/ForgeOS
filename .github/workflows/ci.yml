@@ -91,7 +91,7 @@ jobs:
   windows-e2e:
     name: Windows E2E
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 70
 
     env:
       CODEX_WEBUI_E2E_PORT: "44173"
@@ -101,6 +101,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Pin reproducible build metadata
+        shell: pwsh
+        run: |
+          $commit = (git rev-parse HEAD).Trim()
+          $timestamp = (git show -s --format=%cI HEAD).Trim()
+          $epochMs = [DateTimeOffset]::Parse($timestamp).ToUnixTimeMilliseconds()
+          "CODEX_WEBUI_BUILD_COMMIT=$commit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODEX_WEBUI_BUILD_EPOCH_MS=$epochMs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODEX_WEBUI_BUILD_TIMESTAMP=$timestamp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Setup Node
         uses: actions/setup-node@v4

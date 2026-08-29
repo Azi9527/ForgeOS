@@ -162,10 +162,9 @@ test("opens a project folder into release and operations workspaces", async ({ p
 });
 
 test("runs the real ForgeOS repository build through gateway validation and records audit", async ({ page }) => {
-  // A cold Windows runner can spend close to both 10-minute server-side
-  // check budgets compiling the release gateway and running regressions.
-  // Leave time for setup, evidence assertions, audit polling, and cleanup.
-  test.setTimeout(1_500_000);
+  // The synchronous RPC retains a 30-minute server-side run budget. Keep the
+  // client deadline above that contract plus bounded cleanup and assertions.
+  test.setTimeout(1_980_000);
   await login(page);
 
   const repositoryRoot = process.cwd();
@@ -223,7 +222,7 @@ test("runs the real ForgeOS repository build through gateway validation and reco
     }>(page, "projectLifecycle/validation/run", {
       projectId,
       expectedRevision: configured.result?.revision
-    }, 1_260_000);
+    }, 1_860_000);
     expect(validated.ok, validated.error).toBeTruthy();
     const run = validated.result?.validation.runs[0];
     expect(run?.status).toBe("passed");

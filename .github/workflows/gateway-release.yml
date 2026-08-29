@@ -19,6 +19,34 @@ permissions:
   attestations: write
 
 jobs:
+  verify-ci:
+    name: Verify tested release commit
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require a successful push CI run for this exact commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          response="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&status=success&per_page=100")"
+          if ! jq -e \
+            --arg sha "$GITHUB_SHA" \
+            '[.workflow_runs[] | select(
+              .head_sha == $sha and
+              .event == "push" and
+              .conclusion == "success" and
+              (.head_branch == "main" or (.head_branch | startswith("codex/enterprise-platform-")))
+            )] | length > 0' <<<"$response" >/dev/null; then
+            echo "The tagged commit has no successful push CI run on an approved release branch." >&2
+            exit 1
+          fi
+
   bundle:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
@@ -141,6 +169,12 @@ jobs:
           }
           & node $installedCli '--help' | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "ForgeOS operator CLI could not load from the offline package." }
+          $forgeosShim = Join-Path $offlineRoot 'node_modules/.bin/forgeos.cmd'
+          if (-not (Test-Path -LiteralPath $forgeosShim -PathType Leaf)) {
+            throw "ForgeOS operator package did not install the forgeos command shim."
+          }
+          & $forgeosShim '--help' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Installed forgeos command shim could not start." }
           $digest = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -LiteralPath "$target.sha256" -Value "$digest  $([IO.Path]::GetFileName($target))" -Encoding utf8NoBOM
       - name: Attest Windows release assets
@@ -160,7 +194,9 @@ jobs:
   release:
     name: Publish permanent GitHub Release
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
-    needs: bundle
+    needs:
+      - verify-ci
+      - bundle
     runs-on: ubuntu-latest
     permissions:
       actions: read
