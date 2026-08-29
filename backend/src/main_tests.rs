@@ -18,7 +18,7 @@ fn default_gateway_runtime_stack_is_low_memory_friendly() {
     );
 }
 
-fn init_test_git_repo(repo_path: &Path) {
+pub(crate) fn init_test_git_repo(repo_path: &Path) {
     fs::create_dir_all(repo_path).unwrap();
     let commands = [
         vec!["init".to_string(), repo_path.display().to_string()],
@@ -58,7 +58,11 @@ fn init_test_git_repo(repo_path: &Path) {
     assert!(commit.status.success(), "git commit failed");
 }
 
-fn test_state(project_root: PathBuf, allowed_roots: Vec<PathBuf>, codex_home: PathBuf) -> AppState {
+pub(crate) fn test_state(
+    project_root: PathBuf,
+    allowed_roots: Vec<PathBuf>,
+    codex_home: PathBuf,
+) -> AppState {
     let profile_id = "default".to_string();
     let profile_data_dir = project_root
         .join(".data")
@@ -1307,6 +1311,8 @@ for raw_line in sys.stdin:
 
 mod attachments_and_recovery;
 mod auth_git_static;
+mod project_lifecycle_execution;
+mod project_manifest;
 mod residual_safety;
 mod runtime_queue_and_catalog;
 mod session_flow;

@@ -13,6 +13,7 @@ struct PreparedProjectImport {
     repository_root: Option<String>,
     conversation_ids: Vec<String>,
     source: String,
+    from_manifest: bool,
 }
 
 fn require_project_name(value: Option<&Value>) -> ApiResult<String> {
@@ -59,13 +60,18 @@ fn require_conversation_id(params: &Value) -> ApiResult<String> {
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "conversationId is required."))
 }
 
-fn normalized_path_key(value: &str) -> String {
+pub(crate) fn normalized_path_key(value: &str) -> String {
     let path = PathBuf::from(value.trim());
     let normalized = path
         .to_string_lossy()
         .replace('\\', "/")
         .trim_end_matches('/')
         .to_string();
+    let normalized = normalized
+        .strip_prefix("//?/UNC/")
+        .map(|value| format!("//{value}"))
+        .or_else(|| normalized.strip_prefix("//?/").map(str::to_string))
+        .unwrap_or(normalized);
     if cfg!(windows) {
         normalized.to_lowercase()
     } else {
@@ -213,46 +219,6 @@ fn projects_by_id_mut(ui_state: &mut Value) -> ApiResult<&mut serde_json::Map<St
         })
 }
 
-fn sync_legacy_folder(ui_state: &mut Value, project: &Value) -> ApiResult<()> {
-    let project_id = project
-        .get("projectId")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let name = project
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let now = now_unix_ms();
-    let folders = ui_state
-        .get_mut("sessionFoldersByName")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Session folder compatibility state is missing.",
-            )
-        })?;
-    let current = folders
-        .get(name)
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let folder = json!({
-        "projectId": project_id,
-        "name": name,
-        "pinned": project.get("pinned").and_then(Value::as_bool).unwrap_or(false),
-        "rootPath": project.get("rootPath").cloned().unwrap_or(Value::Null),
-        "repoPath": project.get("repositoryRoot").cloned().unwrap_or(Value::Null),
-        "lastSessionId": project.get("lastConversationId").cloned().unwrap_or(Value::Null),
-        "lastOpenedAt": project.get("lastOpenedAt").cloned().unwrap_or(Value::Null),
-        "settings": project.get("settings").cloned().unwrap_or_else(|| json!({ "model": Value::Null })),
-        "createdAt": current.get("createdAt").cloned().unwrap_or_else(|| json!(now)),
-        "updatedAt": project.get("updatedAt").cloned().unwrap_or_else(|| json!(now))
-    });
-    folders.insert(name.to_string(), folder);
-    Ok(())
-}
-
 fn project_record_value(
     project_id: &str,
     name: &str,
@@ -300,6 +266,16 @@ fn find_project_by_name_or_root(ui_state: &Value, name: &str, root_path: &str) -
             })
         })
         .cloned()
+}
+
+fn validate_project_root_update(current_root: &str, next_root: &str) -> ApiResult<()> {
+    if normalized_path_key(current_root) != normalized_path_key(next_root) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "Changing a registered project root is not supported. Import the other directory as a new project.",
+        ));
+    }
+    Ok(())
 }
 
 async fn resolve_optional_repository_root(
@@ -420,23 +396,111 @@ pub(crate) async fn create_project_v2_payload(
     profile_id: &str,
     params: Value,
 ) -> ApiResult<Value> {
-    let name = require_project_name(params.get("name"))?;
+    let requested_name = require_project_name(params.get("name"))?;
     let requested_root = params
         .get("rootPath")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "rootPath is required."))?;
-    let root_path = resolve_allowed_directory(state, requested_root).await?;
-    let repository_root = resolve_optional_repository_root(state, &params, &root_path).await?;
-    let source = params
+    let root_path =
+        resolve_or_create_project_directory(state, requested_root, &requested_name).await?;
+    let requested_repository_root =
+        resolve_optional_repository_root(state, &params, &root_path).await?;
+    let requested_source = params
         .get("source")
         .and_then(Value::as_str)
         .filter(|source| matches!(*source, "created" | "imported"))
         .unwrap_or("created");
-    let project_id = format!("prj_{}", Uuid::new_v4().simple());
+    let allowed_roots = resolved_allowed_roots(&state.config).await;
+    let manifest = read_project_manifest(&root_path, &allowed_roots).await;
+    let (name, project_id, repository_root, source, recovered_from_manifest) = match manifest {
+        ProjectManifestRead::Valid(manifest) => {
+            if normalized_path_key(&manifest.root_path) != normalized_path_key(&root_path) {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "The project manifest belongs to another directory.",
+                ));
+            }
+            let repository_root =
+                if params.get("repositoryRoot").is_some() || params.get("repoPath").is_some() {
+                    requested_repository_root
+                } else if let Some(repository_root) = manifest.repository_root.as_deref() {
+                    resolve_git_repo_root(state, repository_root)
+                        .await
+                        .ok()
+                        .or(requested_repository_root)
+                } else {
+                    requested_repository_root
+                };
+            (
+                manifest.name,
+                manifest.project_id,
+                repository_root,
+                "imported",
+                true,
+            )
+        }
+        ProjectManifestRead::Corrupt => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "The project manifest is damaged. Review the import preview before registering this directory.",
+            ));
+        }
+        ProjectManifestRead::Missing | ProjectManifestRead::Legacy => (
+            requested_name,
+            format!("prj_{}", Uuid::new_v4().simple()),
+            requested_repository_root,
+            requested_source,
+            false,
+        ),
+    };
 
-    let payload = with_ui_state_write(state, profile_id, |ui_state| {
+    let payload = with_ui_state_and_text_files_write(state, profile_id, |ui_state| {
+        if recovered_from_manifest && let Some(existing) = project_record(ui_state, &project_id) {
+            if existing
+                .get("rootPath")
+                .and_then(Value::as_str)
+                .is_none_or(|root| normalized_path_key(root) != normalized_path_key(&root_path))
+            {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "This projectId is already registered to another directory.",
+                ));
+            }
+            let update = project_manifest_file_update(&existing, &allowed_roots)?;
+            return Ok((
+                json!({
+                    "created": false,
+                    "project": project_payload(ui_state, &existing),
+                    "projectRegistry": project_registry_payload_from_ui_state(ui_state),
+                    "knownTags": known_tags_from_ui_state(ui_state),
+                    "sessionFolders": session_folders_from_ui_state(ui_state)
+                }),
+                vec![update],
+            ));
+        }
+        if recovered_from_manifest
+            && registry_from_ui_state(ui_state)
+                .and_then(|registry| registry.get("projectsById"))
+                .and_then(Value::as_object)
+                .is_some_and(|projects| {
+                    projects.iter().any(|(existing_id, project)| {
+                        existing_id != &project_id
+                            && project
+                                .get("rootPath")
+                                .and_then(Value::as_str)
+                                .is_some_and(|root| {
+                                    normalized_path_key(root) == normalized_path_key(&root_path)
+                                })
+                    })
+                })
+        {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "This directory is already registered with another projectId.",
+            ));
+        }
         if let Some(existing) = find_project_by_name_or_root(ui_state, &name, &root_path) {
             let existing_matches = existing
                 .get("name")
@@ -454,13 +518,17 @@ pub(crate) async fn create_project_v2_payload(
                     "A project with this name or root directory already exists.",
                 ));
             }
-            return Ok(json!({
-                "created": false,
-                "project": project_payload(ui_state, &existing),
-                "projectRegistry": project_registry_payload_from_ui_state(ui_state),
-                "knownTags": known_tags_from_ui_state(ui_state),
-                "sessionFolders": session_folders_from_ui_state(ui_state)
-            }));
+            let update = project_manifest_file_update(&existing, &allowed_roots)?;
+            return Ok((
+                json!({
+                    "created": false,
+                    "project": project_payload(ui_state, &existing),
+                    "projectRegistry": project_registry_payload_from_ui_state(ui_state),
+                    "knownTags": known_tags_from_ui_state(ui_state),
+                    "sessionFolders": session_folders_from_ui_state(ui_state)
+                }),
+                vec![update],
+            ));
         }
         let now = now_unix_ms();
         let project = project_record_value(
@@ -473,14 +541,18 @@ pub(crate) async fn create_project_v2_payload(
             now,
         );
         projects_by_id_mut(ui_state)?.insert(project_id.clone(), project.clone());
-        sync_legacy_folder(ui_state, &project)?;
-        Ok(json!({
-            "created": true,
-            "project": project_payload(ui_state, &project),
-            "projectRegistry": project_registry_payload_from_ui_state(ui_state),
-            "knownTags": known_tags_from_ui_state(ui_state),
-            "sessionFolders": session_folders_from_ui_state(ui_state)
-        }))
+        sync_project_compatibility_folder(ui_state, &project)?;
+        let update = project_manifest_file_update(&project, &allowed_roots)?;
+        Ok((
+            json!({
+                "created": true,
+                "project": project_payload(ui_state, &project),
+                "projectRegistry": project_registry_payload_from_ui_state(ui_state),
+                "knownTags": known_tags_from_ui_state(ui_state),
+                "sessionFolders": session_folders_from_ui_state(ui_state)
+            }),
+            vec![update],
+        ))
     })
     .await?;
     emit_project_registry_updated(state, profile_id, &payload).await;
@@ -560,7 +632,31 @@ pub(crate) async fn update_project_v2_payload(
         })
         .transpose()?;
 
-    let payload = with_ui_state_write(state, profile_id, |ui_state| {
+    let current_root = with_ui_state_read(state, profile_id, |ui_state| {
+        project_record(ui_state, &project_id)
+            .and_then(|project| {
+                project
+                    .get("rootPath")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Project was not found."))
+    })
+    .await?;
+    let target_root = root_path_patch.as_deref().unwrap_or(&current_root);
+    validate_project_root_update(&current_root, target_root)?;
+    let allowed_roots = resolved_allowed_roots(&state.config).await;
+    if let ProjectManifestRead::Valid(manifest) =
+        read_project_manifest(target_root, &allowed_roots).await
+        && manifest.project_id != project_id
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "This directory contains a manifest for another projectId.",
+        ));
+    }
+
+    let payload = with_ui_state_and_text_files_write(state, profile_id, |ui_state| {
         let current = project_record(ui_state, &project_id)
             .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Project was not found."))?;
         let current_revision = current.get("revision").and_then(Value::as_u64).unwrap_or(1);
@@ -569,6 +665,13 @@ pub(crate) async fn update_project_v2_payload(
                 StatusCode::CONFLICT,
                 "Project was updated by another request.",
             ));
+        }
+        if let Some(Some(last_conversation_id)) = last_conversation_patch.as_ref() {
+            validate_project_last_conversation_binding(
+                ui_state,
+                &project_id,
+                last_conversation_id,
+            )?;
         }
         let current_name = current
             .get("name")
@@ -583,6 +686,13 @@ pub(crate) async fn update_project_v2_payload(
                 .unwrap_or_default()
                 .to_string()
         });
+        validate_project_root_update(
+            current
+                .get("rootPath")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            &next_root,
+        )?;
         if registry_from_ui_state(ui_state)
             .and_then(|registry| registry.get("projectsById"))
             .and_then(Value::as_object)
@@ -681,13 +791,17 @@ pub(crate) async fn update_project_v2_payload(
             }
         }
         projects_by_id_mut(ui_state)?.insert(project_id.clone(), next.clone());
-        sync_legacy_folder(ui_state, &next)?;
-        Ok(json!({
-            "project": project_payload(ui_state, &next),
-            "projectRegistry": project_registry_payload_from_ui_state(ui_state),
-            "knownTags": known_tags_from_ui_state(ui_state),
-            "sessionFolders": session_folders_from_ui_state(ui_state)
-        }))
+        sync_project_compatibility_folder(ui_state, &next)?;
+        let update = project_manifest_file_update(&next, &allowed_roots)?;
+        Ok((
+            json!({
+                "project": project_payload(ui_state, &next),
+                "projectRegistry": project_registry_payload_from_ui_state(ui_state),
+                "knownTags": known_tags_from_ui_state(ui_state),
+                "sessionFolders": session_folders_from_ui_state(ui_state)
+            }),
+            vec![update],
+        ))
     })
     .await?;
     emit_project_registry_updated(state, profile_id, &payload).await;
@@ -701,17 +815,8 @@ pub(crate) async fn archive_project_v2_payload(
 ) -> ApiResult<Value> {
     let project_id = require_project_id(&params)?;
     let payload = with_ui_state_write(state, profile_id, |ui_state| {
-        let mut project = project_record(ui_state, &project_id)
-            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Project was not found."))?;
         let now = now_unix_ms();
-        let object = project
-            .as_object_mut()
-            .expect("project records are objects");
-        object.insert("status".to_string(), Value::String("archived".to_string()));
-        object.insert("updatedAt".to_string(), json!(now));
-        let revision = object.get("revision").and_then(Value::as_u64).unwrap_or(1) + 1;
-        object.insert("revision".to_string(), json!(revision));
-        projects_by_id_mut(ui_state)?.insert(project_id.clone(), project.clone());
+        let project = archive_project_conversation_state(ui_state, &project_id, now)?;
         Ok(json!({
             "project": project_payload(ui_state, &project),
             "projectRegistry": project_registry_payload_from_ui_state(ui_state),
@@ -891,7 +996,7 @@ fn migration_candidates(ui_state: &Value, sessions: &[Value]) -> Vec<Value> {
 async fn migration_sessions(state: &AppState, profile_id: &str) -> (Vec<Value>, Vec<String>) {
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
-    for archived in [false, true] {
+    'archive_scope: for archived in [false, true] {
         let mut cursor = None;
         loop {
             match list_sessions_payload(
@@ -905,21 +1010,23 @@ async fn migration_sessions(state: &AppState, profile_id: &str) -> (Vec<Value>, 
             .await
             {
                 Ok(payload) => {
-                    sessions.extend(
-                        payload
-                            .get("sessions")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
-                    cursor = payload
+                    let page = payload
+                        .get("sessions")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let next_cursor = payload
                         .get("nextCursor")
                         .and_then(Value::as_str)
                         .map(str::to_string);
-                    if cursor.is_none() || sessions.len() >= PROJECT_IMPORT_SESSION_LIMIT {
-                        if sessions.len() >= PROJECT_IMPORT_SESSION_LIMIT {
-                            warnings.push(format!("Conversation discovery was capped at {PROJECT_IMPORT_SESSION_LIMIT} records."));
-                        }
+                    if append_migration_session_page(&mut sessions, page, next_cursor.is_some()) {
+                        warnings.push(format!(
+                            "Conversation discovery was capped at {PROJECT_IMPORT_SESSION_LIMIT} records."
+                        ));
+                        break 'archive_scope;
+                    }
+                    cursor = next_cursor;
+                    if cursor.is_none() {
                         break;
                     }
                 }
@@ -944,33 +1051,64 @@ async fn migration_sessions(state: &AppState, profile_id: &str) -> (Vec<Value>, 
     (sessions, warnings)
 }
 
+fn append_migration_session_page(
+    sessions: &mut Vec<Value>,
+    page: Vec<Value>,
+    has_next_page: bool,
+) -> bool {
+    let remaining = PROJECT_IMPORT_SESSION_LIMIT.saturating_sub(sessions.len());
+    let page_was_truncated = page.len() > remaining;
+    sessions.extend(page.into_iter().take(remaining));
+    page_was_truncated || (sessions.len() >= PROJECT_IMPORT_SESSION_LIMIT && has_next_page)
+}
+
 pub(crate) async fn preview_project_import_v2_payload(
     state: &AppState,
     profile_id: &str,
 ) -> ApiResult<Value> {
     let (sessions, warnings) = migration_sessions(state, profile_id).await;
-    with_ui_state_read(state, profile_id, |ui_state| {
-        let mut candidates = migration_candidates(ui_state, &sessions);
-        for candidate in &mut candidates {
-            if let Some(candidate_key) = candidate.get("candidateKey").and_then(Value::as_str) {
-                let proposed_project_id = stable_project_id(profile_id, candidate_key);
-                candidate
-                    .as_object_mut()
-                    .expect("migration candidates are objects")
-                    .insert(
-                        "proposedProjectId".to_string(),
-                        Value::String(proposed_project_id),
-                    );
-            }
-        }
-        Ok(json!({
-            "schemaVersion": PROJECT_REGISTRY_SCHEMA_VERSION,
-            "writePerformed": false,
-            "candidates": candidates,
-            "warnings": warnings
-        }))
+    let (mut candidates, projects) = with_ui_state_read(state, profile_id, |ui_state| {
+        let projects = project_registry_payload_from_ui_state(ui_state)
+            .get("projects")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok((migration_candidates(ui_state, &sessions), projects))
     })
-    .await
+    .await?;
+    let allowed_roots = resolved_allowed_roots(&state.config).await;
+    enrich_project_candidates_with_manifests(&mut candidates, &projects, &allowed_roots).await;
+    for candidate in &mut candidates {
+        if candidate
+            .get("proposedProjectId")
+            .and_then(Value::as_str)
+            .is_none()
+            && let Some(candidate_key) = candidate.get("candidateKey").and_then(Value::as_str)
+        {
+            candidate["proposedProjectId"] =
+                Value::String(stable_project_id(profile_id, candidate_key));
+        }
+    }
+    Ok(json!({
+        "schemaVersion": PROJECT_REGISTRY_SCHEMA_VERSION,
+        "writePerformed": false,
+        "candidates": candidates,
+        "warnings": warnings
+    }))
+}
+
+fn require_complete_project_import_preview(preview: &Value) -> ApiResult<()> {
+    if preview
+        .get("warnings")
+        .and_then(Value::as_array)
+        .is_some_and(|warnings| !warnings.is_empty())
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "PROJECT_IMPORT_INCOMPLETE: Conversation discovery was incomplete. Resolve the preview warnings and refresh before importing projects.",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn commit_project_import_v2_payload(
@@ -990,6 +1128,7 @@ pub(crate) async fn commit_project_import_v2_payload(
         .filter(|keys| !keys.is_empty())
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "candidateKeys is required."))?;
     let preview = preview_project_import_v2_payload(state, profile_id).await?;
+    require_complete_project_import_preview(&preview)?;
     let selected = preview
         .get("candidates")
         .and_then(Value::as_array)
@@ -1054,7 +1193,12 @@ pub(crate) async fn commit_project_import_v2_payload(
         conversation_ids.sort();
         conversation_ids.dedup();
         prepared.push(PreparedProjectImport {
-            project_id: stable_project_id(profile_id, &candidate_key),
+            project_id: candidate
+                .get("proposedProjectId")
+                .and_then(Value::as_str)
+                .filter(|project_id| project_id.starts_with("prj_") && project_id.len() > 4)
+                .map(str::to_string)
+                .unwrap_or_else(|| stable_project_id(profile_id, &candidate_key)),
             candidate_key,
             name,
             root_path,
@@ -1065,39 +1209,84 @@ pub(crate) async fn commit_project_import_v2_payload(
                 .and_then(Value::as_str)
                 .unwrap_or("legacy")
                 .to_string(),
+            from_manifest: candidate.get("manifestProjectId").is_some(),
         });
     }
 
-    let payload = with_ui_state_write(state, profile_id, |ui_state| {
+    let allowed_roots = resolved_allowed_roots(&state.config).await;
+    let payload = with_ui_state_and_text_files_write(state, profile_id, |ui_state| {
         let now = now_unix_ms();
         let mut imported = Vec::new();
+        let mut file_updates = Vec::new();
         for prepared in &prepared {
-            let project =
-                find_project_by_name_or_root(ui_state, &prepared.name, &prepared.root_path)
-                    .unwrap_or_else(|| {
-                        project_record_value(
-                            &prepared.project_id,
-                            &prepared.name,
-                            &prepared.root_path,
-                            prepared.repository_root.as_deref(),
-                            "migrated",
-                            (prepared.source == "sessionFolder").then_some(prepared.name.as_str()),
-                            now,
-                        )
-                    });
+            let existing_by_id = project_record(ui_state, &prepared.project_id);
+            if existing_by_id.as_ref().is_some_and(|project| {
+                project
+                    .get("rootPath")
+                    .and_then(Value::as_str)
+                    .is_none_or(|root| {
+                        normalized_path_key(root) != normalized_path_key(&prepared.root_path)
+                    })
+            }) {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "This projectId was registered to another directory after the preview.",
+                ));
+            }
+            if registry_from_ui_state(ui_state)
+                .and_then(|registry| registry.get("projectsById"))
+                .and_then(Value::as_object)
+                .is_some_and(|projects| {
+                    projects.iter().any(|(project_id, project)| {
+                        project_id != &prepared.project_id
+                            && project
+                                .get("rootPath")
+                                .and_then(Value::as_str)
+                                .is_some_and(|root| {
+                                    normalized_path_key(root)
+                                        == normalized_path_key(&prepared.root_path)
+                                })
+                    })
+                })
+            {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "This directory was registered with another projectId after the preview.",
+                ));
+            }
+            let project = existing_by_id
+                .or_else(|| {
+                    (!prepared.from_manifest)
+                        .then(|| {
+                            find_project_by_name_or_root(
+                                ui_state,
+                                &prepared.name,
+                                &prepared.root_path,
+                            )
+                        })
+                        .flatten()
+                })
+                .unwrap_or_else(|| {
+                    project_record_value(
+                        &prepared.project_id,
+                        &prepared.name,
+                        &prepared.root_path,
+                        prepared.repository_root.as_deref(),
+                        "migrated",
+                        (prepared.source == "sessionFolder").then_some(prepared.name.as_str()),
+                        now,
+                    )
+                });
             let project_id = project
                 .get("projectId")
                 .and_then(Value::as_str)
                 .unwrap_or(&prepared.project_id)
                 .to_string();
             projects_by_id_mut(ui_state)?.insert(project_id.clone(), project.clone());
-            sync_legacy_folder(ui_state, &project)?;
-            let bindings = project_registry_mut(ui_state)?
-                .get_mut("projectIdByThreadId")
-                .and_then(Value::as_object_mut)
-                .expect("project conversation bindings are ensured");
+            sync_project_compatibility_folder(ui_state, &project)?;
+            file_updates.push(project_manifest_file_update(&project, &allowed_roots)?);
             for conversation_id in &prepared.conversation_ids {
-                bindings.insert(conversation_id.clone(), Value::String(project_id.clone()));
+                attach_project_conversation_state(ui_state, &project_id, conversation_id, now)?;
             }
             project_registry_mut(ui_state)?
                 .get_mut("migrationCommitsByKey")
@@ -1110,12 +1299,15 @@ pub(crate) async fn commit_project_import_v2_payload(
             imported
                 .push(json!({ "candidateKey": prepared.candidate_key, "projectId": project_id }));
         }
-        Ok(json!({
-            "imported": imported,
-            "projectRegistry": project_registry_payload_from_ui_state(ui_state),
-            "knownTags": known_tags_from_ui_state(ui_state),
-            "sessionFolders": session_folders_from_ui_state(ui_state)
-        }))
+        Ok((
+            json!({
+                "imported": imported,
+                "projectRegistry": project_registry_payload_from_ui_state(ui_state),
+                "knownTags": known_tags_from_ui_state(ui_state),
+                "sessionFolders": session_folders_from_ui_state(ui_state)
+            }),
+            file_updates,
+        ))
     })
     .await?;
     emit_project_registry_updated(state, profile_id, &payload).await;
@@ -1148,56 +1340,9 @@ pub(crate) async fn attach_project_conversation_v2_payload(
     let project_id = require_project_id(&params)?;
     let conversation_id = require_conversation_id(&params)?;
     let payload = with_ui_state_write(state, profile_id, |ui_state| {
-        let mut project = project_record(ui_state, &project_id)
-            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Project was not found."))?;
-        if project.get("status").and_then(Value::as_str) == Some("archived") {
-            return Err(api_error(
-                StatusCode::CONFLICT,
-                "Archived projects cannot accept conversations.",
-            ));
-        }
-        project_registry_mut(ui_state)?
-            .get_mut("projectIdByThreadId")
-            .and_then(Value::as_object_mut)
-            .expect("project conversation bindings are ensured")
-            .insert(conversation_id.clone(), Value::String(project_id.clone()));
-        let project_name = project
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let meta = ui_state
-            .get_mut("sessionMetaByThreadId")
-            .and_then(Value::as_object_mut)
-            .expect("session metadata state is ensured")
-            .entry(conversation_id.clone())
-            .or_insert_with(|| json!({ "pinned": false, "tags": [] }));
-        let tags = meta
-            .as_object_mut()
-            .expect("session metadata records are objects")
-            .entry("tags".to_string())
-            .or_insert_with(|| json!([]));
-        let tags = tags.as_array_mut().expect("session tags are arrays");
-        if !tags
-            .iter()
-            .any(|tag| tag.as_str() == Some(project_name.as_str()))
-        {
-            tags.push(Value::String(project_name));
-        }
         let now = now_unix_ms();
-        let object = project
-            .as_object_mut()
-            .expect("project records are objects");
-        object.insert(
-            "lastConversationId".to_string(),
-            Value::String(conversation_id.clone()),
-        );
-        object.insert("lastOpenedAt".to_string(), json!(now));
-        object.insert("updatedAt".to_string(), json!(now));
-        let revision = object.get("revision").and_then(Value::as_u64).unwrap_or(1) + 1;
-        object.insert("revision".to_string(), json!(revision));
-        projects_by_id_mut(ui_state)?.insert(project_id.clone(), project.clone());
-        sync_legacy_folder(ui_state, &project)?;
+        let project =
+            attach_project_conversation_state(ui_state, &project_id, &conversation_id, now)?;
         Ok(json!({
             "project": project_payload(ui_state, &project),
             "projectRegistry": project_registry_payload_from_ui_state(ui_state),
@@ -1218,30 +1363,8 @@ pub(crate) async fn detach_project_conversation_v2_payload(
     let project_id = require_project_id(&params)?;
     let conversation_id = require_conversation_id(&params)?;
     let payload = with_ui_state_write(state, profile_id, |ui_state| {
-        let project = project_record(ui_state, &project_id)
-            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Project was not found."))?;
-        let project_name = project
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let bindings = project_registry_mut(ui_state)?
-            .get_mut("projectIdByThreadId")
-            .and_then(Value::as_object_mut)
-            .expect("project conversation bindings are ensured");
-        if bindings.get(&conversation_id).and_then(Value::as_str) == Some(project_id.as_str()) {
-            bindings.remove(&conversation_id);
-        }
-        if let Some(tags) = ui_state
-            .get_mut("sessionMetaByThreadId")
-            .and_then(Value::as_object_mut)
-            .and_then(|entries| entries.get_mut(&conversation_id))
-            .and_then(Value::as_object_mut)
-            .and_then(|meta| meta.get_mut("tags"))
-            .and_then(Value::as_array_mut)
-        {
-            tags.retain(|tag| tag.as_str() != Some(project_name.as_str()));
-        }
+        let now = now_unix_ms();
+        detach_project_conversation_state(ui_state, &project_id, &conversation_id, now)?;
         Ok(json!({
             "detached": true,
             "projectId": project_id,

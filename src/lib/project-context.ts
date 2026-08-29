@@ -1,8 +1,13 @@
 import type { SessionFolder, SessionSummary } from "./types";
 
 function normalizeProjectRootPath(value: string | null | undefined) {
-  const normalized = value?.trim().replace(/^\\\\\?\\/u, "").replace(/[\\/]+$/u, "").toLocaleLowerCase() ?? "";
-  return normalized || null;
+  const raw = value?.trim() ?? "";
+  if (!raw) {
+    return null;
+  }
+  const windowsPath = /^[a-z]:[\\/]/iu.test(raw) || /^\\\\/u.test(raw);
+  const normalized = raw.replace(/^\\\\\?\\/u, "").replace(/[\\/]+$/u, "");
+  return windowsPath ? normalized.toLocaleLowerCase() : normalized;
 }
 
 export type ProjectContext = {
@@ -18,6 +23,7 @@ export type ProjectContext = {
 type ResolveProjectContextOptions = {
   projects: SessionFolder[];
   sessions: SessionSummary[];
+  activeProjectId?: string | null;
   activeProjectName: string | null;
   selectedSessionId: string | null;
 };
@@ -36,10 +42,14 @@ function projectMatchesSession(project: SessionFolder, session: SessionSummary) 
 export function resolveProjectContext({
   projects,
   sessions,
+  activeProjectId = null,
   activeProjectName,
   selectedSessionId
 }: ResolveProjectContextOptions): ProjectContext | null {
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
+  const identifiedProject = activeProjectId
+    ? projects.find((project) => project.projectId === activeProjectId) ?? null
+    : null;
   const explicitProject = projects.find((project) => project.name === activeProjectName) ?? null;
   const boundProject = selectedSession
     ? projects.find((project) => project.projectId && project.conversationIds?.includes(selectedSession.id)) ?? null
@@ -51,7 +61,7 @@ export function resolveProjectContext({
   const rootedProject = selectedRoot
     ? projects.find((project) => normalizeProjectRootPath(project.rootPath) === selectedRoot) ?? null
     : null;
-  const project = explicitProject ?? boundProject ?? taggedProject ?? rootedProject;
+  const project = identifiedProject ?? explicitProject ?? boundProject ?? taggedProject ?? rootedProject;
   if (!project) {
     return null;
   }

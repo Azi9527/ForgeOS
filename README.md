@@ -1,10 +1,21 @@
-# codex-webui
+# ForgeOS
 
-`codex-webui` is a reconnect-safe web workspace for Codex CLI.
+ForgeOS is an enterprise AI-native application development, release, and
+operations platform built on the OpenAI Codex runtime. A project is the primary
+object: its long-running AI development conversations, source tree, Git state,
+validation evidence, artifacts, releases, environments, deployments, policy,
+and audit history all share one immutable `projectId` context.
 
-It keeps Codex turns running on the server when the browser disconnects, exposes a Claude-like multi-panel UI, and aims to cover the day-to-day workflow people expect from the Codex app and the Codex VS Code extension without requiring VS Code itself.
+Codex remains responsible for model interaction, agent turns, tools, sandboxing,
+approvals, and MCP. ForgeOS adds the engineering control plane that makes those
+capabilities usable as a continuous project lifecycle: browser reconnect,
+project governance, server-owned validation and deployment evidence, controlled
+release gates, notifications, audit, upgrade, rollback, and data recovery.
 
-## Why This Exists
+The current distribution retains the `codex-webui` executable as a compatibility
+alias. New installations and operator documentation use the `forgeos` command.
+
+## Product Boundary
 
 Codex already has strong native surfaces:
 
@@ -12,15 +23,18 @@ Codex already has strong native surfaces:
 - `codex app` for the desktop app experience
 - the Codex IDE extension for editor-integrated workflows
 
-`codex-webui` focuses on a different deployment shape:
+ForgeOS provides a different deployment and governance shape:
 
-- a browser UI you can host on your own machine or server
-- reconnect-safe long-running work
-- explicit password-gated access
-- Git, terminals, queueing, and file inspection in one place
-- base-path and reverse-proxy friendly deployment
+- an enterprise project center with durable project identity;
+- reconnect-safe, long-running Codex development conversations;
+- code, Git, Diff, terminal, validation, release, environment, and audit workspaces;
+- owner/admin/viewer controls and production approval gates;
+- gateway-owned execution evidence rather than browser-reported success;
+- signed project artifacts, notifications, upgrade rollback, and business-data recovery;
+- self-hosted, base-path and reverse-proxy friendly deployment.
 
-The goal is not to replace upstream surfaces. The goal is to make Codex usable from a browser while preserving the operational model of local Codex execution.
+The goal is not to reimplement Codex. Codex makes the agent capable; ForgeOS
+makes the software lifecycle controlled, observable, and recoverable.
 
 The project also optimizes for a case where native Codex surfaces can become expensive: many historical sessions, very long rollouts, and browser clients that reconnect frequently. Instead of asking Codex to materialize every session and every turn up front, the web gateway maintains its own lightweight session index, parses only the rollout metadata and recent turn window needed for the current view, and hydrates older turns or large tool details only when the user asks for them.
 
@@ -43,6 +57,7 @@ The project also optimizes for a case where native Codex surfaces can become exp
 - Git repository discovery, status, fetch/pull, staged/unstaged Source Control sections, dense tree-or-list change browsing, commit inspection, branch checkout, and worktree management in a VS Code-inspired Git workspace
 - Terminal tabs that survive page reloads as long as the server process stays up
 - Runtime install/update checks, quota and reset-ticket display, plugin/marketplace/skill/MCP management, app catalog visibility, and `config.toml` editing
+- Versioned, SHA-256-verified backup and atomic restore for ForgeOS-owned profile business data, with a retained pre-restore safety backup
 - Memory workspace for inspecting profile memory settings/storage, resetting native Codex memory data, and toggling per-session memory eligibility
 - Computer-use groundwork through Codex app-server plugin/app proxies, dynamic tool-call responses, image/text tool output rendering, remote-control status events, and a documented WebSocket snapshot-stream path before any WebRTC dependency
 - Persistent notification center with unread sync, plus Slack and generic webhook delivery for completion, attention, queue-failure, and shutdown events
@@ -56,44 +71,37 @@ The project also optimizes for a case where native Codex surfaces can become exp
 
 ## Current Status
 
-The app is usable today and already supports real work, but the packaging and some internal APIs are still moving.
+ForgeOS `0.3.0-rc.1` is the five-stage release candidate. The Project Registry
+and lifecycle APIs are gateway-authoritative; browser local state is not accepted
+as validation, release, deployment, or audit truth.
 
-Stable enough to use:
+Release-candidate baseline:
 
-- background server lifecycle
-- browser login
-- multi-client session sync
-- progressive session loading
-- large-history session listing and recent-turn hydration
-- queue persistence
-- Git and terminal workflows
+- immutable project identity and project/conversation binding;
+- continuous Codex sessions with reconnect and progressive history loading;
+- project-scoped code, Git, Diff, terminal, validation, release, operations, and audit;
+- gateway-executed validation, deployment, and health checks with bounded evidence;
+- production approval policy, artifact integrity, and enterprise notification routing;
+- cross-platform gateway bundles, readiness-checked upgrade rollback, and verified data recovery.
 
-Recent UI work worth calling out:
-
-- a denser Git Source Control workspace with separate staged and unstaged sections
-- tree and flat-list change browsing for repository diffs
-- faster one-row file actions for open, stage, and unstage flows
-- mobile navigation that preserves the same Git workflow in a compressed layout
-
-Still evolving:
-
-- npm distribution polish
-- documentation depth
-- parity details with upstream Codex surfaces
+Known release-candidate limits are documented in
+[the five-stage delivery baseline](./docs/five-stage-delivery.md). PyPI is not a
+release dependency; GitHub Releases are the primary binary distribution channel.
 
 ## Feature Coverage
 
-`codex-webui` intentionally tracks the workflows people expect from the Codex app and IDE surfaces, but it does not copy them one-to-one.
+ForgeOS intentionally tracks the workflows people expect from the Codex app and IDE surfaces, but it does not copy them one-to-one.
 
 - For a high-level feature matrix, see [docs/feature-matrix.md](./docs/feature-matrix.md).
 - For architecture details, see [docs/architecture.md](./docs/architecture.md).
 - For packaging and `npx` distribution details, see [docs/distribution.md](./docs/distribution.md).
+- For the gateway business-data backup scope and restore runbook, see [docs/gateway-data-backup.md](./docs/gateway-data-backup.md).
 - For computer-use and realtime transport decisions, see [docs/computer-use.md](./docs/computer-use.md).
 - For the current upstream-compatibility and parser-hardening plan, see [PLAN.md](./PLAN.md).
 
 ## Architecture
 
-`codex-webui` has a narrow public edge and a Codex-focused private layer:
+ForgeOS has a narrow public edge and a Codex-focused private layer:
 
 1. the browser loads a single workspace page
 2. password login and attachment upload use credentialed HTTP requests
@@ -117,7 +125,7 @@ More detail is in [docs/architecture.md](./docs/architecture.md).
 ```bash
 pnpm install
 pnpm build
-node ./bin/codex-webui.mjs
+pnpm cli
 ```
 
 On first launch the CLI opens an interactive setup flow and writes:
@@ -125,7 +133,7 @@ On first launch the CLI opens an interactive setup flow and writes:
 - config: `~/.codex/codex-webui.yml`
 - runtime state: `~/.codex/codex-webui/`
 
-After setup, running `codex-webui` again starts the background server and prints:
+After setup, running `forgeos` again starts the background server and prints:
 
 - launch URL
 - PID
@@ -154,11 +162,20 @@ The CLI prints the workspace root URL and the login experience is handled inline
 
 ## Using The Published CLI
 
-The intended distribution path is:
+Install the published operator package globally, or run its primary command
+without a permanent installation:
 
 ```bash
-npx codex-webui
+npm install --global codex-webui
+forgeos
+
+# One-shot alternative
+npx --package codex-webui forgeos
 ```
+
+The published package coordinate remains `codex-webui` for upgrade compatibility.
+`forgeos` is the primary product command; `codex-webui` remains a compatibility
+alias for existing automation.
 
 On first run the CLI:
 
@@ -170,19 +187,19 @@ On first run the CLI:
 Once configured, the CLI supports:
 
 ```bash
-codex-webui
-codex-webui config
-codex-webui status
-codex-webui restart
-codex-webui stop
-codex-webui tunnel start --yes
-codex-webui tunnel status
-codex-webui tunnel stop
-codex-webui tunnel logs
-codex-webui --hcaptcha-site-key <site-key> --hcaptcha-secret-key <secret>
+forgeos
+forgeos config
+forgeos status
+forgeos restart
+forgeos stop
+forgeos tunnel start --yes
+forgeos tunnel status
+forgeos tunnel stop
+forgeos tunnel logs
+forgeos --hcaptcha-site-key <site-key> --hcaptcha-secret-key <secret>
 ```
 
-`codex-webui restart` prepares a Codex app-server handoff before it stops the gateway. On Unix this handoff is enabled by default: active Codex work stays in a persistent local app-server, while both the old and replacement gateways use the native WebSocket protocol over its private Unix socket. Normal `codex-webui stop` still tears down the managed Codex app-server. A legacy stdio client with no live turn is closed during restart preparation; restart is refused only when a non-handoff client still owns active work, so an idle process cannot permanently block upgrades.
+`forgeos restart` prepares a Codex app-server handoff before it stops the gateway. On Unix this handoff is enabled by default: active Codex work stays in a persistent local app-server, while both the old and replacement gateways use the native WebSocket protocol over its private Unix socket. Normal `forgeos stop` still tears down the managed Codex app-server. A legacy stdio client with no live turn is closed during restart preparation; restart is refused only when a non-handoff client still owns active work, so an idle process cannot permanently block upgrades.
 
 `tunnel` supports provider selection, background or foreground execution, status inspection, and log inspection. It prefers `cloudflared` when available and falls back to `ngrok`. Starting a public tunnel prints a safety checklist and requires explicit confirmation; use `--yes` only after reviewing the exposure.
 
@@ -234,7 +251,7 @@ Meaning of the main fields:
 - `host` / `port`: public bind address for the Rust gateway
 - `basePath`: deployment prefix, for example `/absproxy/4173`
 - `codexBin`: path or command name for the Codex CLI binary
-- `dataDir`: global `codex-webui` runtime state, uploads, queue state, notifications, and editor metadata
+- `dataDir`: global ForgeOS runtime state, uploads, queue state, notifications, and editor metadata
 - `defaultProfileId`: the profile selected for new browser sessions unless a different profile cookie is already set
 - `profiles`: named Codex runtimes, each with its own `CODEX_HOME` and profile-local data directory
 - `allowedRoots`: filesystem roots the UI is allowed to browse
@@ -247,7 +264,7 @@ Meaning of the main fields:
 
 ## Multi-Account Profiles
 
-`codex-webui` supports multiple Codex accounts by treating each account as a profile with its own `CODEX_HOME`.
+ForgeOS supports multiple Codex accounts by treating each account as a profile with its own `CODEX_HOME`.
 
 - A profile should point at a distinct directory such as `~/.codex-work` or `~/.codex-personal`.
 - Codex stores `auth.json`, `config.toml`, sessions, plugins, and skills under `CODEX_HOME`, so separating profiles at that level avoids account collisions.
@@ -266,7 +283,7 @@ If you only want one account at a time, you can still keep a single profile and 
 - The Settings workspace can edit `config.toml` directly.
 - Changing session or composer preferences syncs the relevant defaults back into `config.toml`.
 - Existing sessions keep their own persisted preferences; changing defaults mainly affects new sessions and future default state.
-- Language bridge is an opt-in session/default preference. When enabled, Codex Web UI first creates an ephemeral translation thread, sends the translated English prompt to the real session, and adds a developer instruction that keeps the final answer in the selected output language. The default is stored under `[codex_webui]` in `config.toml`.
+- Language bridge is an opt-in session/default preference. When enabled, ForgeOS first creates an ephemeral translation thread, sends the translated English prompt to the real session, and adds a developer instruction that keeps the final answer in the selected output language. The default is stored under `[codex_webui]` in `config.toml`.
 - Reset tickets, when exposed by the active Codex app-server, appear in the account popover next to quota. Ticket use is confirmed in the browser before dispatch. Builds that only expose rate-limit snapshots simply hide the reset-ticket section.
 - If a saved draft exists while a session is still hydrating, local input typed into the composer wins; draft restore will not clobber text or attachments the user entered during loading.
 - Queued follow-ups are stored server-side and can continue after the page closes as long as the server remains up.
@@ -291,10 +308,10 @@ Resource limits:
 - Terminals also stay alive while the Rust gateway remains up.
 - "Shutdown after queue completes" is a server-global operational toggle, not a per-session preference.
 - When that toggle is armed, the gateway waits until every session queue is empty and no live Codex turn is still running before scheduling shutdown.
-- The scheduled shutdown timestamp is persisted in `codex-webui` state, synchronized to every connected client, and can still execute if no client is connected.
-- Notification center history and webhook settings are also persisted in `codex-webui` runtime state so multiple clients see the same unread counts and delivery configuration.
-- Session organization metadata such as pins, tags, and saved sidebar filters also lives in `codex-webui` runtime state rather than ephemeral browser storage.
-- Prompt presets also live in `codex-webui` runtime state so slash-command behavior stays consistent across browsers.
+- The scheduled shutdown timestamp is persisted in ForgeOS state, synchronized to every connected client, and can still execute if no client is connected.
+- Notification center history and webhook settings are also persisted in ForgeOS runtime state so multiple clients see the same unread counts and delivery configuration.
+- Session organization metadata such as pins, tags, and saved sidebar filters also lives in ForgeOS runtime state rather than ephemeral browser storage.
+- Prompt presets also live in ForgeOS runtime state so slash-command behavior stays consistent across browsers.
 - Audit entries for privileged login and WebSocket actions are appended to `CODEX_WEBUI_DATA_DIR/audit-log.jsonl`.
 
 ## Environment Overrides
@@ -376,7 +393,7 @@ pnpm dev
 
 ```bash
 pnpm build
-node ./bin/codex-webui.mjs
+pnpm cli
 ```
 
 ### Verification
@@ -421,11 +438,11 @@ The public WebSocket gateway treats request IDs as reconnect-safe replay keys. I
 
 ### A session shows "Done" or "Needs input" on one device but not another
 
-Those sidebar badges are backend-owned state, not browser-local UI markers. `codex-webui` persists them in its own runtime store and includes them in session summaries, so reconnecting browsers and newly opened clients see the same completion or attention state until the session is acknowledged.
+Those sidebar badges are backend-owned state, not browser-local UI markers. ForgeOS persists them in its own runtime store and includes them in session summaries, so reconnecting browsers and newly opened clients see the same completion or attention state until the session is acknowledged.
 
 ### I typed into the composer while a session was loading
 
-Composer input is treated as authoritative once you start typing. If an older saved draft for that session exists, `codex-webui` skips restoring it rather than overwriting the text or attachments you already entered locally.
+Composer input is treated as authoritative once you start typing. If an older saved draft for that session exists, ForgeOS skips restoring it rather than overwriting the text or attachments you already entered locally.
 
 ### Shutdown after queue completion did not trigger
 
@@ -446,9 +463,9 @@ Attachment uploads use credentialed `multipart/form-data` requests. Check:
 
 ### The server keeps logging `invalid_grant: Invalid refresh token`
 
-`codex app-server` can surface that error when the stored ChatGPT refresh token is no longer valid. `codex-webui` now degrades account reads to `requiresOpenaiAuth` so the workspace still loads, but the affected profile must be re-authenticated before account-specific features recover.
+`codex app-server` can surface that error when the stored ChatGPT refresh token is no longer valid. ForgeOS degrades account reads to `requiresOpenaiAuth` so the workspace still loads, but the affected profile must be re-authenticated before account-specific features recover.
 
-### `npx codex-webui` cannot start the gateway
+### `forgeos` cannot start the gateway
 
 Make sure one of these exists:
 

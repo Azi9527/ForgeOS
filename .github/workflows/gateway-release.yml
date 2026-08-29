@@ -7,6 +7,11 @@ on:
       - "codex/enterprise-platform-*"
     tags:
       - "v*"
+      - "forgeos-v*"
+
+concurrency:
+  group: gateway-release-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -14,6 +19,34 @@ permissions:
   attestations: write
 
 jobs:
+  verify-ci:
+    name: Verify tested release commit
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require a successful push CI run for this exact commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          response="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&status=success&per_page=100")"
+          if ! jq -e \
+            --arg sha "$GITHUB_SHA" \
+            '[.workflow_runs[] | select(
+              .head_sha == $sha and
+              .event == "push" and
+              .conclusion == "success" and
+              (.head_branch == "main" or (.head_branch | startswith("codex/enterprise-platform-")))
+            )] | length > 0' <<<"$response" >/dev/null; then
+            echo "The tagged commit has no successful push CI run on an approved release branch." >&2
+            exit 1
+          fi
+
   bundle:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
@@ -24,7 +57,7 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - runner: macos-13
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
@@ -58,14 +91,139 @@ jobs:
           Compress-Archive -Path (Join-Path $bundle.FullName '*') -DestinationPath $archive -Force
           $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -LiteralPath "$archive.sha256" -Value "$digest  $($bundle.Name).zip" -Encoding utf8NoBOM
-      - name: Attest Windows gateway upgrade archive
+      - name: Package ForgeOS Windows operator CLI
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tagVersion = $env:GITHUB_REF_NAME -replace '^(forgeos-)?v', ''
+            if ($tagVersion -ne $packageVersion) {
+              throw "Release tag version '$tagVersion' does not match package.json version '$packageVersion'."
+            }
+          }
+          $packJson = npm pack --ignore-scripts --pack-destination artifacts --json | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "ForgeOS operator package creation failed." }
+          $package = $packJson | ConvertFrom-Json
+          if (@($package).Count -ne 1 -or $package[0].name -cne 'codex-webui' -or $package[0].version -cne $packageVersion) {
+            throw "ForgeOS operator pack metadata does not identify the expected single package."
+          }
+          $bundledDependencies = @($package[0].bundled)
+          if (($bundledDependencies -join ',') -cne 'yaml') {
+            throw "ForgeOS operator package must bundle exactly the pinned yaml runtime dependency."
+          }
+          $filePaths = @($package[0].files | ForEach-Object { $_.path })
+          foreach ($requiredPath in @(
+            'README.md',
+            'bin/codex-webui.mjs',
+            'build/static/index.html',
+            'dist/backend/x86_64-pc-windows-msvc/backend.exe',
+            'scripts/gateway-data-backup.mjs',
+            'scripts/gateway-release.mjs',
+            'scripts/gateway-start-lock.mjs',
+            'node_modules/yaml/package.json',
+            'node_modules/yaml/dist/index.js',
+            'node_modules/yaml/LICENSE'
+          )) {
+            if ($requiredPath -notin $filePaths) {
+              throw "ForgeOS operator package is missing required runtime file '$requiredPath'."
+            }
+          }
+          foreach ($filePath in $filePaths) {
+            if ($filePath.StartsWith('backend/src/') -or $filePath.StartsWith('src/')) {
+              throw "ForgeOS operator package unexpectedly contains source file '$filePath'."
+            }
+            if ($filePath.StartsWith('node_modules/') -and -not $filePath.StartsWith('node_modules/yaml/')) {
+              throw "ForgeOS operator package contains an unreviewed bundled dependency '$filePath'."
+            }
+          }
+          $source = Join-Path artifacts $package[0].filename
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "ForgeOS operator package was not created." }
+          $target = Join-Path artifacts "forgeos-platform-$packageVersion-windows-x64.tgz"
+          Move-Item -LiteralPath $source -Destination $target -Force
+          $offlineRoot = Join-Path $env:RUNNER_TEMP "forgeos-operator-offline-$env:GITHUB_RUN_ATTEMPT"
+          $offlineCache = Join-Path $offlineRoot 'npm-cache'
+          New-Item -ItemType Directory -Path $offlineRoot -Force | Out-Null
+          if (Test-Path -LiteralPath $offlineCache) { throw "Offline smoke-test cache was not empty." }
+          npm install --prefix $offlineRoot --ignore-scripts --no-audit --no-fund --omit=dev --package-lock=false --save=false --offline --cache $offlineCache $target
+          if ($LASTEXITCODE -ne 0) { throw "ForgeOS operator package is not self-contained for offline installation." }
+          $installedRoot = Join-Path $offlineRoot 'node_modules/codex-webui'
+          $installedPackage = Get-Content -LiteralPath (Join-Path $installedRoot 'package.json') -Raw | ConvertFrom-Json
+          $runtimeDependencies = @($installedPackage.dependencies.PSObject.Properties.Name)
+          if (($runtimeDependencies -join ',') -cne 'yaml' -or $installedPackage.dependencies.yaml -cne '2.8.3') {
+            throw "ForgeOS operator runtime dependencies are not pinned to the reviewed closure."
+          }
+          if ((@($installedPackage.bundledDependencies) -join ',') -cne 'yaml') {
+            throw "ForgeOS operator package metadata does not preserve the bundled runtime closure."
+          }
+          $installedYaml = Get-Content -LiteralPath (Join-Path $installedRoot 'node_modules/yaml/package.json') -Raw | ConvertFrom-Json
+          if ($installedYaml.version -cne $installedPackage.dependencies.yaml) {
+            throw "ForgeOS operator bundled yaml version does not match package metadata."
+          }
+          $installedCli = Join-Path $installedRoot 'bin/codex-webui.mjs'
+          $resolvedYaml = & node '--input-type=module' '-e' 'import { createRequire } from "node:module"; import { pathToFileURL } from "node:url"; const require = createRequire(pathToFileURL(process.argv[1])); process.stdout.write(require.resolve("yaml"));' $installedCli
+          if ($LASTEXITCODE -ne 0) { throw "ForgeOS operator could not resolve its bundled yaml dependency." }
+          $yamlRoot = [IO.Path]::GetFullPath((Join-Path $installedRoot 'node_modules/yaml')).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+          if (-not [IO.Path]::GetFullPath($resolvedYaml).StartsWith($yamlRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "ForgeOS operator resolved yaml outside the signed package."
+          }
+          & node $installedCli '--help' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "ForgeOS operator CLI could not load from the offline package." }
+          $forgeosShim = Join-Path $offlineRoot 'node_modules/.bin/forgeos.cmd'
+          if (-not (Test-Path -LiteralPath $forgeosShim -PathType Leaf)) {
+            throw "ForgeOS operator package did not install the forgeos command shim."
+          }
+          & $forgeosShim '--help' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Installed forgeos command shim could not start." }
+          $digest = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$target.sha256" -Value "$digest  $([IO.Path]::GetFileName($target))" -Encoding utf8NoBOM
+      - name: Attest Windows release assets
         if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: artifacts/*.zip
+          subject-path: |
+            artifacts/*.zip
+            artifacts/*.tgz
       - name: Upload gateway bundle
         uses: actions/upload-artifact@v4
         with:
           name: forgeos-gateway-${{ github.run_id }}-${{ matrix.target }}
           path: artifacts/**
           if-no-files-found: error
+
+  release:
+    name: Publish permanent GitHub Release
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    needs:
+      - verify-ci
+      - bundle
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download gateway artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: forgeos-gateway-${{ github.run_id }}-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Publish Windows upgrade assets to GitHub Release only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -d '' assets < <(find release-artifacts -type f \( -name '*.zip' -o -name '*.zip.sha256' -o -name '*.tgz' -o -name '*.tgz.sha256' \) -print0)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No Windows release assets were downloaded." >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --generate-notes \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "ForgeOS Gateway $GITHUB_REF_NAME" \
+              --verify-tag
+          fi

@@ -549,9 +549,15 @@ pub(crate) async fn execute_ws_method(
                 .await
                 .map_err(anyhow::Error::from)
         }
-        "projectLifecycle/get" => get_project_lifecycle_payload(state, &auth.profile_id, params)
-            .await
-            .map_err(anyhow::Error::from),
+        "projectLifecycle/get" => {
+            let mut lifecycle = get_project_lifecycle_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)?;
+            if auth.role == UserRole::Viewer {
+                redact_project_lifecycle_for_viewer(&mut lifecycle);
+            }
+            Ok(lifecycle)
+        }
         "projectLifecycle/migration/get" => {
             get_project_lifecycle_migration_payload(state, &auth.profile_id, params)
                 .await
@@ -577,13 +583,24 @@ pub(crate) async fn execute_ws_method(
                 .await
                 .map_err(anyhow::Error::from)
         }
-        "projectLifecycle/validation/save" => {
-            save_project_validation_payload(state, &auth.profile_id, params)
+        "projectLifecycle/validation/save" => save_project_validation_payload(state, auth, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "projectLifecycle/validation/run" => run_project_validation_payload(state, auth, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "projectLifecycle/validation/cancel" => {
+            cancel_project_validation_payload(state, auth, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        "projectLifecycle/validation/acknowledgeCleanup" => {
+            acknowledge_project_validation_cleanup_payload(state, auth, params)
                 .await
                 .map_err(anyhow::Error::from)
         }
         "projectLifecycle/validation/record" => {
-            record_project_validation_payload(state, auth, params)
+            run_legacy_project_validation_payload(state, auth, params)
                 .await
                 .map_err(anyhow::Error::from)
         }
@@ -593,9 +610,19 @@ pub(crate) async fn execute_ws_method(
         "projectLifecycle/release/save" => save_project_release_payload(state, auth, params)
             .await
             .map_err(anyhow::Error::from),
-        "projectLifecycle/operations/save" => save_project_operations_payload(state, auth, params)
+        "projectLifecycle/operations/save" => {
+            save_project_operations_compat_payload(state, auth, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        "projectLifecycle/deployment/run" => run_project_deployment_payload(state, auth, params)
             .await
             .map_err(anyhow::Error::from),
+        "projectLifecycle/environment/check" => {
+            check_project_environment_payload(state, auth, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
         "sessionFilters/save" => save_session_filter_payload(
             state,
             &auth.profile_id,

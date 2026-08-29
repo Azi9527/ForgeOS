@@ -7,6 +7,37 @@ fn owner_auth() -> AuthContext {
     }
 }
 
+fn admin_auth() -> AuthContext {
+    AuthContext {
+        role: UserRole::Admin,
+        profile_id: "operator-a".to_string(),
+    }
+}
+
+#[test]
+fn lifecycle_addressing_rejects_legacy_project_names_with_upgrade_guidance() {
+    assert_eq!(
+        require_lifecycle_project_id(&json!({ "projectId": "prj_forgeos" })).unwrap(),
+        "prj_forgeos"
+    );
+    let error = require_lifecycle_project_id(&json!({ "projectName": "ForgeOS" })).unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert!(error.message.starts_with("UPGRADE_REQUIRED:"));
+    assert_eq!(
+        require_lifecycle_project_id(&json!({})).unwrap_err().status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        require_lifecycle_project_id(&json!({
+            "projectId": "invalid",
+            "projectName": "ForgeOS"
+        }))
+        .unwrap_err()
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+}
+
 #[test]
 fn lifecycle_default_has_bounded_empty_sections() {
     assert_eq!(
@@ -20,6 +51,78 @@ fn lifecycle_default_has_bounded_empty_sections() {
             "release": { "artifacts": [], "releases": [] },
             "operations": { "environments": [], "deployments": [] },
             "governance": default_project_governance()
+        })
+    );
+}
+
+#[test]
+fn viewer_lifecycle_redaction_preserves_evidence_without_sensitive_details() {
+    let mut lifecycle = json!({
+        "validation": {
+            "checks": [{ "id": "build", "command": "secret-build" }],
+            "runs": [{
+                "operator": { "profileId": "owner-a", "role": "owner" },
+                "cleanupAcknowledgedBy": { "profileId": "approver-a", "role": "owner" },
+                "checks": [{ "command": "secret-build", "output": "secret-output" }]
+            }]
+        },
+        "release": {
+            "artifacts": [{ "createdBy": { "profileId": "owner-a", "role": "owner" } }],
+            "releases": [{
+                "approvals": [{ "profileId": "approver-a", "role": "admin", "approvedAt": 1 }]
+            }]
+        },
+        "operations": {
+            "environments": [{
+                "deployCommand": "secret-deploy",
+                "healthCommand": "secret-health",
+                "lastHealthOutput": "secret-health-output",
+                "lastHealthCheck": {
+                    "logs": "secret-health-log",
+                    "operator": { "profileId": "owner-a", "role": "owner" }
+                }
+            }],
+            "deployments": [{
+                "logs": "secret-deployment-log",
+                "operator": { "profileId": "owner-a", "role": "owner" }
+            }]
+        }
+    });
+
+    redact_project_lifecycle_for_viewer(&mut lifecycle);
+
+    assert_eq!(
+        lifecycle,
+        json!({
+            "validation": {
+                "checks": [{ "id": "build", "command": "" }],
+                "runs": [{
+                    "operator": { "profileId": "redacted", "role": "owner" },
+                    "cleanupAcknowledgedBy": { "profileId": "redacted", "role": "owner" },
+                    "checks": [{ "command": "", "output": "" }]
+                }]
+            },
+            "release": {
+                "artifacts": [{ "createdBy": { "profileId": "redacted", "role": "owner" } }],
+                "releases": [{
+                    "approvals": [{ "profileId": "redacted", "role": "admin", "approvedAt": 1 }]
+                }]
+            },
+            "operations": {
+                "environments": [{
+                    "deployCommand": Value::Null,
+                    "healthCommand": Value::Null,
+                    "lastHealthOutput": Value::Null,
+                    "lastHealthCheck": {
+                        "logs": Value::Null,
+                        "operator": { "profileId": "redacted", "role": "owner" }
+                    }
+                }],
+                "deployments": [{
+                    "logs": Value::Null,
+                    "operator": { "profileId": "redacted", "role": "owner" }
+                }]
+            }
         })
     );
 }
@@ -76,46 +179,7 @@ fn retention_marks_only_unprotected_expired_artifacts_for_archive() {
 }
 
 #[test]
-fn validation_run_is_bound_to_server_operator_and_digest() {
-    let run = normalized_validation_run(
-        &json!({
-            "id": "run-1",
-            "startedAt": 10,
-            "finishedAt": 20,
-            "status": "passed",
-            "rootPath": "D:/code/ForgeOS",
-            "branch": "main",
-            "commit": "abc123",
-            "operator": { "profileId": "untrusted", "role": "owner" },
-            "checks": [{
-                "id": "test",
-                "label": "自动测试",
-                "command": "npm test",
-                "required": true,
-                "status": "passed",
-                "exitCode": 0,
-                "durationMs": 50,
-                "output": "ok"
-            }]
-        }),
-        &owner_auth(),
-    )
-    .unwrap();
-
-    assert_eq!(
-        run.get("operator"),
-        Some(&json!({ "profileId": "operator-a", "role": "owner" }))
-    );
-    assert_eq!(
-        run.get("evidenceDigest")
-            .and_then(Value::as_str)
-            .map(str::len),
-        Some(64)
-    );
-}
-
-#[test]
-fn validation_checks_and_output_are_capped() {
+fn validation_checks_are_capped() {
     let checks = (0..20)
         .map(|index| {
             json!({
@@ -127,20 +191,6 @@ fn validation_checks_and_output_are_capped() {
         })
         .collect::<Vec<_>>();
     assert_eq!(normalized_validation_checks(Some(&json!(checks))).len(), 12);
-
-    let evidence = normalized_validation_evidence(&json!({
-        "id": "test",
-        "label": "test",
-        "command": "run",
-        "required": true,
-        "status": "passed",
-        "output": "x".repeat(MAX_EVIDENCE_OUTPUT_BYTES + 100)
-    }))
-    .unwrap();
-    assert_eq!(
-        evidence.get("output").and_then(Value::as_str).map(str::len),
-        Some(MAX_EVIDENCE_OUTPUT_BYTES)
-    );
 }
 
 #[test]
@@ -171,7 +221,182 @@ fn release_requires_approval_before_publish() {
 }
 
 #[test]
-fn production_release_requires_two_distinct_approvers_including_owner() {
+fn approvals_are_distinct_by_profile_and_role() {
+    let owner_release = normalized_release(
+        &json!({
+            "id": "release-1",
+            "version": "1.0.0",
+            "status": "awaitingApproval",
+            "approvals": [{ "approvedAt": 10 }]
+        }),
+        &owner_auth(),
+        None,
+    )
+    .unwrap();
+    let admin_release = normalized_release(
+        &json!({
+            "id": "release-1",
+            "version": "1.0.0",
+            "status": "awaitingApproval",
+            "approvals": [{ "approvedAt": 10 }, { "approvedAt": 20 }]
+        }),
+        &admin_auth(),
+        Some(&owner_release),
+    )
+    .unwrap();
+
+    assert_eq!(
+        admin_release.get("approvals"),
+        Some(&json!([
+            { "profileId": "operator-a", "role": "owner", "approvedAt": 10 },
+            { "profileId": "operator-a", "role": "admin", "approvedAt": 20 }
+        ]))
+    );
+}
+
+#[test]
+fn repeated_approval_from_the_same_profile_and_role_is_deduplicated() {
+    let first = normalized_release(
+        &json!({
+            "id": "release-1",
+            "version": "1.0.0",
+            "status": "awaitingApproval",
+            "approvals": [{ "approvedAt": 10 }]
+        }),
+        &admin_auth(),
+        None,
+    )
+    .unwrap();
+    let replayed = normalized_release(
+        &json!({
+            "id": "release-1",
+            "version": "1.0.0",
+            "status": "awaitingApproval",
+            "approvals": [{ "approvedAt": 10 }, { "approvedAt": 20 }]
+        }),
+        &admin_auth(),
+        Some(&first),
+    )
+    .unwrap();
+
+    assert_eq!(replayed.get("approvals"), first.get("approvals"));
+}
+
+#[test]
+fn environment_schema_does_not_persist_external_credentials() {
+    let environment = normalized_environment(
+        &json!({
+            "id": "production",
+            "name": "Production",
+            "kind": "production",
+            "adapter": "githubActions",
+            "githubRepository": "example/forgeos",
+            "githubWorkflow": "deploy.yml",
+            "githubRef": "main",
+            "healthCommand": "curl --fail https://example.com/health",
+            "credential": "credential-secret",
+            "credentialId": "credential-reference",
+            "githubToken": "github-secret",
+            "password": "password-secret",
+            "headers": { "Authorization": "Bearer bearer-secret" }
+        }),
+        None,
+    )
+    .unwrap();
+
+    for field in [
+        "credential",
+        "credentialId",
+        "githubToken",
+        "password",
+        "headers",
+    ] {
+        assert!(
+            environment.get(field).is_none(),
+            "environment persisted forbidden credential field {field}"
+        );
+    }
+    for secret in [
+        "credential-secret",
+        "credential-reference",
+        "github-secret",
+        "password-secret",
+        "bearer-secret",
+    ] {
+        assert!(!environment.to_string().contains(secret));
+    }
+}
+
+#[test]
+fn release_approval_states_require_an_existing_target_environment() {
+    let lifecycle = json!({
+        "operations": {
+            "environments": [{ "id": "production", "kind": "production" }]
+        }
+    });
+    for status in ["awaitingApproval", "approved", "released"] {
+        assert!(
+            validate_release_environment_binding(
+                &lifecycle,
+                &json!({ "status": status, "targetEnvironmentId": "production" })
+            )
+            .is_ok(),
+            "{status} should accept an existing target"
+        );
+        assert!(
+            validate_release_environment_binding(&lifecycle, &json!({ "status": status })).is_err(),
+            "{status} should require a target"
+        );
+        assert!(
+            validate_release_environment_binding(
+                &lifecycle,
+                &json!({ "status": status, "targetEnvironmentId": "missing" })
+            )
+            .is_err(),
+            "{status} should reject an unknown target"
+        );
+    }
+    assert!(
+        validate_release_environment_binding(&lifecycle, &json!({ "status": "draft" })).is_ok()
+    );
+}
+
+#[test]
+fn unchanged_legacy_targetless_releases_survive_upgrade_without_allowing_mutation() {
+    let legacy = json!({
+        "id": "legacy-release",
+        "version": "0.1.0",
+        "artifactIds": [],
+        "status": "released",
+        "targetEnvironmentId": Value::Null,
+        "approvals": [],
+        "createdAt": 10,
+        "releasedAt": 20,
+        "rollbackOf": Value::Null
+    });
+    let current = json!({
+        "release": { "artifacts": [], "releases": [legacy.clone()] },
+        "operations": { "environments": [] }
+    });
+    let proposed = current.clone();
+    assert!(
+        validate_release_environment_upgrade(&current, &proposed, &legacy).is_ok(),
+        "an unchanged pre-upgrade record must not block unrelated lifecycle saves"
+    );
+
+    let mut changed = legacy.clone();
+    changed["version"] = json!("0.1.1");
+    assert!(validate_release_environment_upgrade(&current, &proposed, &changed).is_err());
+    let new_targetless = json!({
+        "id": "new-release",
+        "status": "awaitingApproval",
+        "targetEnvironmentId": Value::Null
+    });
+    assert!(validate_release_environment_upgrade(&current, &proposed, &new_targetless).is_err());
+}
+
+#[test]
+fn production_release_requires_two_distinct_credentials_including_owner() {
     let lifecycle = json!({
         "operations": {
             "environments": [{ "id": "production", "kind": "production" }]
@@ -186,7 +411,14 @@ fn production_release_requires_two_distinct_approvers_including_owner() {
         "artifactIds": ["artifact-1"],
         "approvals": [{ "profileId": "operator-a", "role": "owner" }]
     });
-    assert!(validate_release_policy(&lifecycle, &one_approval).is_err());
+    assert!(
+        validate_release_policy(
+            &lifecycle,
+            &one_approval,
+            OwnerApprovalPolicy::DedicatedOwner
+        )
+        .is_err()
+    );
 
     let two_approvals = json!({
         "status": "released",
@@ -194,10 +426,45 @@ fn production_release_requires_two_distinct_approvers_including_owner() {
         "artifactIds": ["artifact-1"],
         "approvals": [
             { "profileId": "operator-a", "role": "owner" },
+            { "profileId": "operator-a", "role": "admin" }
+        ]
+    });
+    assert!(
+        validate_release_policy(
+            &lifecycle,
+            &two_approvals,
+            OwnerApprovalPolicy::DedicatedOwner
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn admin_approval_is_owner_equivalent_only_without_a_dedicated_owner() {
+    let lifecycle = json!({
+        "operations": {
+            "environments": [{ "id": "production", "kind": "production" }]
+        },
+        "release": {
+            "artifacts": [{ "id": "artifact-1", "signatureVerified": true }]
+        }
+    });
+    let release = json!({
+        "status": "released",
+        "targetEnvironmentId": "production",
+        "artifactIds": ["artifact-1"],
+        "approvals": [
+            { "profileId": "operator-a", "role": "admin" },
             { "profileId": "operator-b", "role": "admin" }
         ]
     });
-    assert!(validate_release_policy(&lifecycle, &two_approvals).is_ok());
+
+    assert!(
+        validate_release_policy(&lifecycle, &release, OwnerApprovalPolicy::AdminEquivalent).is_ok()
+    );
+    assert!(
+        validate_release_policy(&lifecycle, &release, OwnerApprovalPolicy::DedicatedOwner).is_err()
+    );
 }
 
 #[test]
@@ -220,7 +487,9 @@ fn configured_production_approval_count_is_enforced() {
             { "profileId": "operator-b", "role": "admin" }
         ]
     });
-    assert!(validate_release_policy(&lifecycle, &release).is_err());
+    assert!(
+        validate_release_policy(&lifecycle, &release, OwnerApprovalPolicy::DedicatedOwner).is_err()
+    );
 }
 
 #[test]
@@ -242,5 +511,153 @@ fn production_release_rejects_unsigned_artifacts() {
             { "profileId": "operator-b", "role": "admin" }
         ]
     });
-    assert!(validate_release_policy(&lifecycle, &release).is_err());
+    assert!(
+        validate_release_policy(&lifecycle, &release, OwnerApprovalPolicy::DedicatedOwner).is_err()
+    );
+}
+
+#[test]
+fn deployment_requires_a_released_release_for_the_same_environment() {
+    let lifecycle = json!({
+        "operations": {
+            "environments": [
+                { "id": "staging", "kind": "staging" },
+                { "id": "production", "kind": "production" }
+            ]
+        },
+        "release": {
+            "releases": [
+                {
+                    "id": "release-staging",
+                    "status": "released",
+                    "targetEnvironmentId": "staging"
+                },
+                {
+                    "id": "release-targetless",
+                    "status": "released",
+                    "targetEnvironmentId": null
+                },
+                {
+                    "id": "release-approved",
+                    "status": "approved",
+                    "targetEnvironmentId": "production"
+                }
+            ]
+        }
+    });
+    let valid = json!({
+        "id": "deployment-1",
+        "releaseId": "release-staging",
+        "environmentId": "staging",
+        "status": "running"
+    });
+    assert!(validate_deployment_release_binding(&lifecycle, &valid, None).is_ok());
+
+    let wrong_environment = json!({
+        "id": "deployment-2",
+        "releaseId": "release-staging",
+        "environmentId": "production",
+        "status": "running"
+    });
+    assert!(validate_deployment_release_binding(&lifecycle, &wrong_environment, None).is_err());
+
+    let targetless_production = json!({
+        "id": "deployment-3",
+        "releaseId": "release-targetless",
+        "environmentId": "production",
+        "status": "running"
+    });
+    assert!(validate_deployment_release_binding(&lifecycle, &targetless_production, None).is_err());
+
+    let not_released = json!({
+        "id": "deployment-4",
+        "releaseId": "release-approved",
+        "environmentId": "production",
+        "status": "running"
+    });
+    assert!(validate_deployment_release_binding(&lifecycle, &not_released, None).is_err());
+}
+
+#[test]
+fn deployment_binding_is_immutable_after_creation() {
+    let lifecycle = json!({
+        "operations": {
+            "environments": [
+                { "id": "staging", "kind": "staging" },
+                { "id": "production", "kind": "production" }
+            ]
+        },
+        "release": {
+            "releases": [{
+                "id": "release-staging",
+                "status": "released",
+                "targetEnvironmentId": "staging"
+            }]
+        }
+    });
+    let existing = json!({
+        "id": "deployment-1",
+        "releaseId": "release-staging",
+        "environmentId": "staging",
+        "status": "running"
+    });
+    let rebound = json!({
+        "id": "deployment-1",
+        "releaseId": "release-staging",
+        "environmentId": "production",
+        "status": "running"
+    });
+    assert!(validate_deployment_release_binding(&lifecycle, &rebound, Some(&existing)).is_err());
+}
+
+#[test]
+fn published_release_history_cannot_be_rebound_or_removed() {
+    let current = json!({
+        "release": {
+            "artifacts": [{ "id": "artifact-1" }],
+            "releases": [{
+                "id": "release-1",
+                "version": "1.0.0",
+                "artifactIds": ["artifact-1"],
+                "status": "released",
+                "targetEnvironmentId": "production",
+                "approvals": [],
+                "createdAt": 10,
+                "releasedAt": 20,
+                "rollbackOf": Value::Null
+            }]
+        }
+    });
+    let removed = json!({ "release": { "artifacts": [], "releases": [] } });
+    assert!(validate_published_release_history(&current, &removed).is_err());
+
+    let mut rebound = current.clone();
+    rebound["release"]["releases"][0]["targetEnvironmentId"] = json!("staging");
+    assert!(validate_published_release_history(&current, &rebound).is_err());
+
+    let mut rolled_back = current.clone();
+    rolled_back["release"]["releases"][0]["status"] = json!("rolledBack");
+    assert!(validate_published_release_history(&current, &rolled_back).is_ok());
+}
+
+#[test]
+fn published_release_artifacts_must_remain_present() {
+    let current = json!({ "release": { "artifacts": [], "releases": [] } });
+    let proposed = json!({
+        "release": {
+            "artifacts": [],
+            "releases": [{
+                "id": "release-1",
+                "version": "1.0.0",
+                "artifactIds": ["artifact-1"],
+                "status": "released",
+                "targetEnvironmentId": "staging",
+                "approvals": [],
+                "createdAt": 10,
+                "releasedAt": 20,
+                "rollbackOf": Value::Null
+            }]
+        }
+    });
+    assert!(validate_published_release_history(&current, &proposed).is_err());
 }

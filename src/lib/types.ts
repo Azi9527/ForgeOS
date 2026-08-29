@@ -181,19 +181,24 @@ export type ProjectValidationEvidence = ProjectValidationCheck & {
   exitCode: number | null;
   durationMs: number | null;
   output: string;
+  cleanupConfirmed?: boolean | null;
 };
 
 export type ProjectValidationRun = {
   id: string;
   startedAt: number;
   finishedAt: number | null;
-  status: "running" | "passed" | "failed" | "cancelled";
+  status: "running" | "passed" | "failed" | "cancelled" | "interrupted";
   rootPath: string;
   branch: string | null;
   commit: string | null;
+  configurationDigest?: string | null;
   checks: ProjectValidationEvidence[];
   operator: ProjectLifecycleOperator | null;
   evidenceDigest: string | null;
+  cleanupConfirmed?: boolean | null;
+  cleanupAcknowledgedAt?: number | null;
+  cleanupAcknowledgedBy?: ProjectLifecycleOperator | null;
 };
 
 export type ProjectArtifact = {
@@ -240,6 +245,20 @@ export type ProjectEnvironment = {
   health: "unknown" | "checking" | "healthy" | "unhealthy";
   lastCheckedAt: number | null;
   lastHealthOutput: string | null;
+  lastHealthCheck?: ProjectOperationEvidence | null;
+};
+
+export type ProjectOperationEvidence = {
+  id: string;
+  status: "checking" | "healthy" | "unhealthy" | "interrupted" | string;
+  startedAt: number;
+  finishedAt: number | null;
+  exitCode: number | null;
+  logs: string | null;
+  operator: ProjectLifecycleOperator | null;
+  adapter: "localCommand" | "githubActions" | string;
+  configurationDigest: string | null;
+  evidenceDigest: string | null;
 };
 
 export type ProjectDeployment = {
@@ -252,6 +271,9 @@ export type ProjectDeployment = {
   exitCode: number | null;
   logs: string | null;
   operator: ProjectLifecycleOperator | null;
+  adapter?: "localCommand" | "githubActions" | string;
+  configurationDigest?: string | null;
+  evidenceDigest?: string | null;
 };
 
 export type ProjectGovernance = {

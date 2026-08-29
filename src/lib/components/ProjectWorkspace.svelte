@@ -161,9 +161,15 @@
       <h2 class="mt-1 truncate text-2xl font-bold" style="color: var(--ink-strong);">{project.name}</h2>
       <p class="mt-1 text-sm" style="color: var(--muted);">{zh ? `${project.sessionCount} 条长期开发对话` : `${project.sessionCount} long-lived conversations`}</p>
     </div>
-    <button class="rounded-xl border px-4 py-2 text-xs font-bold" disabled={readOnly || mutationBusy} onclick={onBindRoot} style="border-color: var(--line); color: var(--ink);" type="button">
-      <FolderCog class="mr-2 inline" size={14} />{project.rootPath ? (zh ? "更换根目录" : "Change root") : (zh ? "绑定根目录" : "Bind root")}
-    </button>
+    {#if project.rootPath}
+      <span class="rounded-xl border px-4 py-2 text-xs font-bold" style="border-color: var(--line); color: var(--muted);" title={zh ? "项目根目录是稳定身份的一部分。如需使用其他目录，请导入为新项目。" : "The root is part of the stable project identity. Import another directory as a new project."}>
+        <FolderCog class="mr-2 inline" size={14} />{zh ? "根目录已锁定" : "Root locked"}
+      </span>
+    {:else}
+      <button class="rounded-xl border px-4 py-2 text-xs font-bold" disabled={readOnly || mutationBusy} onclick={onBindRoot} style="border-color: var(--line); color: var(--ink);" type="button">
+        <FolderCog class="mr-2 inline" size={14} />{zh ? "绑定根目录" : "Bind root"}
+      </button>
+    {/if}
   </header>
 
   {#if error}

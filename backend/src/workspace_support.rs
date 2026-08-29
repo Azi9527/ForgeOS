@@ -337,7 +337,7 @@ pub(crate) async fn write_text_file_safely(
         temp_file.write_all(content.as_bytes()).await?;
         temp_file.sync_all().await?;
         drop(temp_file);
-        tokio_fs::rename(&temp_path, &final_path).await?;
+        replace_file_atomically(&temp_path, &final_path).await?;
         if let Ok(parent_dir) = tokio_fs::File::open(&canonical_parent).await {
             let _ = parent_dir.sync_all().await;
         }
@@ -699,6 +699,12 @@ pub(crate) async fn write_editable_file_payload(
 ) -> ApiResult<Value> {
     let resolved_path = resolve_editable_file_path(state, profile_id, file_path).await?;
     let roots = editable_file_roots(state, profile_id).await;
+    if is_project_manifest_path(&resolved_path) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "Project manifests are managed by Project Registry V2 and cannot be edited directly.",
+        ));
+    }
     write_text_file_safely(&resolved_path, content, &roots).await?;
     read_editable_file_payload(state, profile_id, &resolved_path.display().to_string()).await
 }

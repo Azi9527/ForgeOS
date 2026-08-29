@@ -504,6 +504,15 @@ async fn notification_settings_reject_local_webhook_urls() {
         "10.0.0.5".parse().unwrap()
     ));
     assert!(notification_webhook_ip_is_private_or_local(
+        "100.100.100.200".parse().unwrap()
+    ));
+    assert!(notification_webhook_ip_is_private_or_local(
+        "::ffff:169.254.169.254".parse().unwrap()
+    ));
+    assert!(notification_webhook_ip_is_private_or_local(
+        "2001:db8::1".parse().unwrap()
+    ));
+    assert!(notification_webhook_ip_is_private_or_local(
         "fd00::1".parse().unwrap()
     ));
     assert!(!notification_webhook_ip_is_private_or_local(

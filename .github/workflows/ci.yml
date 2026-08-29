@@ -44,6 +44,16 @@ jobs:
       - name: Test frontend state and project context
         run: pnpm test:frontend
 
+      - name: Check frontend and API contract
+        run: |
+          pnpm check
+          pnpm verify:api-parity
+
+      - name: Test gateway data backup and restore
+        run: |
+          pnpm test:gateway-start-lock
+          pnpm test:gateway-data
+
       - name: Test viewer route authorization
         working-directory: backend
         run: cargo test main_tests::auth_git_static::viewer_http_routes_match_websocket_authorization_policy
@@ -68,13 +78,20 @@ jobs:
         working-directory: backend
         run: cargo test main_tests::attachments_and_recovery::attachment_cleanup_retains_recent_orphans_until_min_age
 
+      - name: Test Unix project execution and evidence paths
+        working-directory: backend
+        run: |
+          cargo test project_lifecycle_execution
+          cargo test project_validation_execution
+          cargo test project_operation_command_support
+
       - name: Test tunnel safety
         run: pnpm verify:tunnel-safety
 
   windows-e2e:
     name: Windows E2E
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 70
 
     env:
       CODEX_WEBUI_E2E_PORT: "44173"
@@ -84,6 +101,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Pin reproducible build metadata
+        shell: pwsh
+        run: |
+          $commit = (git rev-parse HEAD).Trim()
+          $timestamp = (git show -s --format=%cI HEAD).Trim()
+          $epochMs = [DateTimeOffset]::Parse($timestamp).ToUnixTimeMilliseconds()
+          "CODEX_WEBUI_BUILD_COMMIT=$commit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODEX_WEBUI_BUILD_EPOCH_MS=$epochMs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODEX_WEBUI_BUILD_TIMESTAMP=$timestamp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -112,10 +139,16 @@ jobs:
       - name: Test project lifecycle and gateway release controls
         run: |
           cargo test --manifest-path backend/Cargo.toml project_registry_support
+          cargo test --manifest-path backend/Cargo.toml project_manifest
           cargo test --manifest-path backend/Cargo.toml project_lifecycle_support
           cargo test --manifest-path backend/Cargo.toml project_lifecycle_migration_support
+          cargo test --manifest-path backend/Cargo.toml project_lifecycle_execution
+          cargo test --manifest-path backend/Cargo.toml project_validation_execution
           cargo test --manifest-path backend/Cargo.toml project_artifact_support
+          cargo test --manifest-path backend/Cargo.toml project_operation_command_support
+          pnpm test:gateway-start-lock
           pnpm test:gateway-release
+          pnpm test:gateway-data
 
       - name: Build app
         run: pnpm build
