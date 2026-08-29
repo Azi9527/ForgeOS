@@ -21,14 +21,14 @@ fn artifact_project_keys_are_stable_and_do_not_expose_names() {
 #[test]
 fn signatures_are_bound_to_artifact_manifest_fields() {
     let key = [7_u8; 32];
-    let payload = artifact_signature_payload("artifact-1", "ForgeOS", "1.2.0", "abc", 42);
+    let payload = artifact_signature_payload("artifact-1", "prj_forgeos", "1.2.0", "abc", 42);
     let signature = sign_artifact_manifest(&key, &payload).unwrap();
     assert_eq!(signature, sign_artifact_manifest(&key, &payload).unwrap());
     assert_ne!(
         signature,
         sign_artifact_manifest(
             &key,
-            &artifact_signature_payload("artifact-1", "ForgeOS", "1.2.1", "abc", 42)
+            &artifact_signature_payload("artifact-1", "prj_forgeos", "1.2.1", "abc", 42)
         )
         .unwrap()
     );

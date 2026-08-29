@@ -52,6 +52,7 @@ import type {
   ProjectDeployment,
   ProjectEnvironment,
   ProjectGovernance,
+  ProjectLifecycleMigrationPayload,
   ProjectLifecyclePayload,
   ProjectMigrationPreview,
   ProjectRecordV2,
@@ -1121,29 +1122,45 @@ export const api = {
     return ws.request<GitStatusPayload>("git/status", { repoPath });
   },
 
-  getProjectLifecycle(projectName: string) {
-    return ws.request<ProjectLifecyclePayload>("projectLifecycle/get", { projectName });
+  getProjectLifecycle(projectId: string) {
+    return ws.request<ProjectLifecyclePayload>("projectLifecycle/get", { projectId });
   },
 
-  saveProjectValidation(projectName: string, checks: ProjectValidationCheck[], revision: number | null = null) {
-    return ws.request<ProjectLifecyclePayload>("projectLifecycle/validation/save", { projectName, checks, revision });
+  getProjectLifecycleMigration(projectId: string) {
+    return ws.request<ProjectLifecycleMigrationPayload>("projectLifecycle/migration/get", { projectId });
   },
 
-  recordProjectValidation(projectName: string, run: ProjectValidationRun, revision: number | null = null) {
-    return ws.request<ProjectLifecyclePayload>("projectLifecycle/validation/record", { projectName, run, revision });
+  commitProjectLifecycleMigration(projectId: string, sourceProjectName: string, strategy: "preferLegacy" | "keepCurrent") {
+    return ws.request<ProjectLifecycleMigrationPayload>("projectLifecycle/migration/commit", { projectId, sourceProjectName, strategy });
   },
 
-  saveProjectGovernance(projectName: string, governance: ProjectGovernance, revision: number | null = null) {
-    return ws.request<ProjectLifecyclePayload>("projectLifecycle/governance/save", { projectName, governance, revision });
+  rollbackProjectLifecycleMigration(projectId: string) {
+    return ws.request<ProjectLifecycleMigrationPayload>("projectLifecycle/migration/rollback", { projectId });
   },
 
-  saveProjectRelease(projectName: string, artifacts: ProjectArtifact[], releases: ProjectRelease[], revision: number | null = null) {
-    return ws.request<ProjectLifecyclePayload>("projectLifecycle/release/save", { projectName, artifacts, releases, revision });
+  recoverProjectLifecycleMigration(projectId: string) {
+    return ws.request<ProjectLifecycleMigrationPayload>("projectLifecycle/migration/recover", { projectId });
   },
 
-  async uploadProjectArtifact(projectName: string, version: string, sourceCommit: string | null, file: File) {
+  saveProjectValidation(projectId: string, checks: ProjectValidationCheck[], revision: number | null = null) {
+    return ws.request<ProjectLifecyclePayload>("projectLifecycle/validation/save", { projectId, checks, revision });
+  },
+
+  recordProjectValidation(projectId: string, run: ProjectValidationRun, revision: number | null = null) {
+    return ws.request<ProjectLifecyclePayload>("projectLifecycle/validation/record", { projectId, run, revision });
+  },
+
+  saveProjectGovernance(projectId: string, governance: ProjectGovernance, revision: number | null = null) {
+    return ws.request<ProjectLifecyclePayload>("projectLifecycle/governance/save", { projectId, governance, revision });
+  },
+
+  saveProjectRelease(projectId: string, artifacts: ProjectArtifact[], releases: ProjectRelease[], revision: number | null = null) {
+    return ws.request<ProjectLifecyclePayload>("projectLifecycle/release/save", { projectId, artifacts, releases, revision });
+  },
+
+  async uploadProjectArtifact(projectId: string, version: string, sourceCommit: string | null, file: File) {
     const formData = new FormData();
-    formData.append("projectName", projectName);
+    formData.append("projectId", projectId);
     formData.append("version", version);
     formData.append("sourceCommit", sourceCommit ?? "");
     formData.append("file", file);
@@ -1154,20 +1171,22 @@ export const api = {
     });
   },
 
-  verifyProjectArtifact(projectName: string, artifactId: string) {
-    return request<{ ok: true; artifact: ProjectArtifact }>(apiPath(`/project-artifacts/verify?projectName=${encodeURIComponent(projectName)}&artifactId=${encodeURIComponent(artifactId)}`));
+  verifyProjectArtifact(projectId: string, artifactId: string) {
+    const query = new URLSearchParams({ projectId, artifactId });
+    return request<{ ok: true; artifact: ProjectArtifact }>(`${apiPath("/project-artifacts/verify")}?${query}`);
   },
 
-  downloadProjectArtifact(projectName: string, artifactId: string) {
-    return downloadRequest(apiPath(`/project-artifacts/download?projectName=${encodeURIComponent(projectName)}&artifactId=${encodeURIComponent(artifactId)}`));
+  downloadProjectArtifact(projectId: string, artifactId: string) {
+    const query = new URLSearchParams({ projectId, artifactId });
+    return downloadRequest(`${apiPath("/project-artifacts/download")}?${query}`);
   },
 
-  getProjectAudit(projectName: string, limit = 100) {
-    return ws.request<{ entries: ProjectAuditEntry[] }>("projectLifecycle/audit/list", { projectName, limit });
+  getProjectAudit(projectId: string, limit = 100) {
+    return ws.request<{ projectId: string; entries: ProjectAuditEntry[] }>("projectLifecycle/audit/list", { projectId, limit });
   },
 
-  saveProjectOperations(projectName: string, environments: ProjectEnvironment[], deployments: ProjectDeployment[], revision: number | null = null) {
-    return ws.request<ProjectLifecyclePayload>("projectLifecycle/operations/save", { projectName, environments, deployments, revision });
+  saveProjectOperations(projectId: string, environments: ProjectEnvironment[], deployments: ProjectDeployment[], revision: number | null = null) {
+    return ws.request<ProjectLifecyclePayload>("projectLifecycle/operations/save", { projectId, environments, deployments, revision });
   },
 
   getGitWorktrees(repoPath: string) {

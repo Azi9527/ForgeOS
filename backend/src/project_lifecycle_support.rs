@@ -32,8 +32,9 @@ fn default_project_governance() -> Value {
     })
 }
 
-fn lifecycle_default(project_name: &str) -> Value {
+pub(crate) fn lifecycle_default(project_id: &str, project_name: &str) -> Value {
     json!({
+        "projectId": project_id,
         "projectName": project_name,
         "revision": 0,
         "updatedAt": Value::Null,
@@ -75,14 +76,14 @@ fn governance_u64(lifecycle: &Value, section: &str, field: &str, fallback: u64) 
         .unwrap_or(fallback)
 }
 
-fn require_project_name(params: &Value) -> ApiResult<String> {
+pub(crate) fn require_lifecycle_project_id(params: &Value) -> ApiResult<String> {
     params
-        .get("projectName")
+        .get("projectId")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| value.starts_with("prj_") && value.len() > 4)
         .map(str::to_string)
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "projectName is required"))
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "projectId is required"))
 }
 
 fn bounded_string(value: Option<&Value>, max_bytes: usize) -> String {
@@ -565,11 +566,9 @@ fn normalized_deployment(
     }))
 }
 
-fn project_exists(ui_state: &Value, project_name: &str) -> bool {
-    ui_state
-        .get("sessionFoldersByName")
-        .and_then(Value::as_object)
-        .is_some_and(|folders| folders.contains_key(project_name))
+pub(crate) fn lifecycle_project_record(ui_state: &Value, project_id: &str) -> ApiResult<Value> {
+    project_record(ui_state, project_id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Project was not found."))
 }
 
 fn lifecycle_revision(value: &Value) -> u64 {
@@ -588,13 +587,19 @@ fn require_matching_revision(current: &Value, params: &Value) -> ApiResult<()> {
     Ok(())
 }
 
-fn lifecycle_from_state(ui_state: &Value, project_name: &str) -> Value {
+pub(crate) fn lifecycle_from_state(
+    ui_state: &Value,
+    project_id: &str,
+    project_name: &str,
+) -> Value {
     let mut lifecycle = ui_state
-        .get("projectLifecycleByName")
+        .get("projectLifecycleById")
         .and_then(Value::as_object)
-        .and_then(|entries| entries.get(project_name))
+        .and_then(|entries| entries.get(project_id))
         .cloned()
-        .unwrap_or_else(|| lifecycle_default(project_name));
+        .unwrap_or_else(|| lifecycle_default(project_id, project_name));
+    lifecycle["projectId"] = json!(project_id);
+    lifecycle["projectName"] = json!(project_name);
     lifecycle["governance"] = normalized_project_governance(lifecycle.get("governance"));
     lifecycle["retentionStatus"] = artifact_retention_status(&lifecycle);
     lifecycle
@@ -605,12 +610,14 @@ pub(crate) async fn get_project_lifecycle_payload(
     profile_id: &str,
     params: Value,
 ) -> ApiResult<Value> {
-    let project_name = require_project_name(&params)?;
+    let project_id = require_lifecycle_project_id(&params)?;
     with_ui_state_read(state, profile_id, |ui_state| {
-        if !project_exists(ui_state, &project_name) {
-            return Err(api_error(StatusCode::NOT_FOUND, "Project was not found."));
-        }
-        Ok(lifecycle_from_state(ui_state, &project_name))
+        let project = lifecycle_project_record(ui_state, &project_id)?;
+        let project_name = project
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        Ok(lifecycle_from_state(ui_state, &project_id, project_name))
     })
     .await
 }
@@ -624,12 +631,14 @@ async fn update_project_lifecycle<F>(
 where
     F: FnOnce(&mut Value, &Value) -> ApiResult<()>,
 {
-    let project_name = require_project_name(&params)?;
+    let project_id = require_lifecycle_project_id(&params)?;
     with_ui_state_write(state, profile_id, |ui_state| {
-        if !project_exists(ui_state, &project_name) {
-            return Err(api_error(StatusCode::NOT_FOUND, "Project was not found."));
-        }
-        let mut lifecycle = lifecycle_from_state(ui_state, &project_name);
+        let project = lifecycle_project_record(ui_state, &project_id)?;
+        let project_name = project
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let mut lifecycle = lifecycle_from_state(ui_state, &project_id, project_name);
         require_matching_revision(&lifecycle, &params)?;
         update(&mut lifecycle, &params)?;
         let revision = lifecycle_revision(&lifecycle).saturating_add(1);
@@ -642,7 +651,7 @@ where
         lifecycle_object.insert("revision".to_string(), json!(revision));
         lifecycle_object.insert("updatedAt".to_string(), json!(now_unix_ms()));
         ui_state
-            .get_mut("projectLifecycleByName")
+            .get_mut("projectLifecycleById")
             .and_then(Value::as_object_mut)
             .ok_or_else(|| {
                 api_error(
@@ -650,7 +659,7 @@ where
                     "project lifecycle state is missing",
                 )
             })?
-            .insert(project_name, lifecycle.clone());
+            .insert(project_id, lifecycle.clone());
         Ok(lifecycle)
     })
     .await
@@ -741,6 +750,7 @@ fn item_status<'a>(items: &'a [Value], id: &str) -> Option<&'a str> {
 async fn emit_project_release_notifications(
     state: &AppState,
     profile_id: &str,
+    project_id: &str,
     project_name: &str,
     previous: &Value,
     current: &Value,
@@ -780,6 +790,7 @@ async fn emit_project_release_notifications(
                 event_type,
                 None,
                 json!({
+                    "projectId": project_id,
                     "projectName": project_name,
                     "releaseId": id,
                     "version": release.get("version").cloned().unwrap_or(Value::Null),
@@ -794,6 +805,7 @@ async fn emit_project_release_notifications(
 async fn emit_project_deployment_notifications(
     state: &AppState,
     profile_id: &str,
+    project_id: &str,
     project_name: &str,
     previous: &Value,
     current: &Value,
@@ -823,6 +835,7 @@ async fn emit_project_deployment_notifications(
                 "projectDeploymentFailed",
                 None,
                 json!({
+                    "projectId": project_id,
                     "projectName": project_name,
                     "deploymentId": id,
                     "releaseId": deployment.get("releaseId").cloned().unwrap_or(Value::Null),
@@ -840,15 +853,20 @@ pub(crate) async fn save_project_release_payload(
     auth: &AuthContext,
     params: Value,
 ) -> ApiResult<Value> {
-    let project_name = require_project_name(&params)?;
+    let project_id = require_lifecycle_project_id(&params)?;
     let previous = get_project_lifecycle_payload(
         state,
         &auth.profile_id,
-        json!({ "projectName": project_name.clone() }),
+        json!({ "projectId": project_id.clone() }),
     )
     .await?;
+    let project_name = previous
+        .get("projectName")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let signing_key = artifact_signing_key(state, &auth.profile_id).await?;
-    let signing_project_name = project_name.clone();
+    let signing_project_id = project_id.clone();
     let updated =
         update_project_lifecycle(state, &auth.profile_id, params, move |lifecycle, params| {
             let current_artifacts = lifecycle["release"]["artifacts"]
@@ -881,7 +899,7 @@ pub(crate) async fn save_project_release_payload(
                         .find(|entry| entry.get("id") == value.get("id"));
                     let signature_verified = artifact_manifest_signature_is_valid(
                         &signing_key,
-                        &signing_project_name,
+                        &signing_project_id,
                         value,
                     );
                     normalized_artifact(value, auth, existing, signature_verified)
@@ -918,8 +936,15 @@ pub(crate) async fn save_project_release_payload(
             Ok(())
         })
         .await?;
-    emit_project_release_notifications(state, &auth.profile_id, &project_name, &previous, &updated)
-        .await;
+    emit_project_release_notifications(
+        state,
+        &auth.profile_id,
+        &project_id,
+        &project_name,
+        &previous,
+        &updated,
+    )
+    .await;
     Ok(updated)
 }
 
@@ -928,13 +953,18 @@ pub(crate) async fn save_project_operations_payload(
     auth: &AuthContext,
     params: Value,
 ) -> ApiResult<Value> {
-    let project_name = require_project_name(&params)?;
+    let project_id = require_lifecycle_project_id(&params)?;
     let previous = get_project_lifecycle_payload(
         state,
         &auth.profile_id,
-        json!({ "projectName": project_name.clone() }),
+        json!({ "projectId": project_id.clone() }),
     )
     .await?;
+    let project_name = previous
+        .get("projectName")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let updated = update_project_lifecycle(state, &auth.profile_id, params, |lifecycle, params| {
         let current_deployments = lifecycle["operations"]["deployments"]
             .as_array()
@@ -971,6 +1001,7 @@ pub(crate) async fn save_project_operations_payload(
     emit_project_deployment_notifications(
         state,
         &auth.profile_id,
+        &project_id,
         &project_name,
         &previous,
         &updated,
@@ -981,14 +1012,32 @@ pub(crate) async fn save_project_operations_payload(
 
 pub(crate) async fn list_project_audit_payload(
     state: &AppState,
+    profile_id: &str,
     params: Value,
 ) -> ApiResult<Value> {
-    let project_name = require_project_name(&params)?;
+    let project_id = require_lifecycle_project_id(&params)?;
     let limit = params
         .get("limit")
         .and_then(Value::as_u64)
         .unwrap_or(100)
         .clamp(1, 200) as usize;
+    let project_targets = with_ui_state_read(state, profile_id, |ui_state| {
+        let project = lifecycle_project_record(ui_state, &project_id)?;
+        let mut targets = vec![project_id.clone()];
+        if let Some(name) = project.get("name").and_then(Value::as_str) {
+            targets.push(name.to_string());
+        }
+        if let Some(legacy_name) = project.get("legacyName").and_then(Value::as_str) {
+            targets.push(legacy_name.to_string());
+        }
+        if let Some(aliases) = project.get("aliases").and_then(Value::as_array) {
+            targets.extend(aliases.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+        targets.sort();
+        targets.dedup();
+        Ok(targets)
+    })
+    .await?;
     let payload = list_audit_log(&state.config, 500)
         .await
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
@@ -997,9 +1046,14 @@ pub(crate) async fn list_project_audit_payload(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|entry| entry.get("target").and_then(Value::as_str) == Some(project_name.as_str()))
+        .filter(|entry| {
+            entry
+                .get("target")
+                .and_then(Value::as_str)
+                .is_some_and(|target| project_targets.iter().any(|candidate| candidate == target))
+        })
         .take(limit)
         .cloned()
         .collect::<Vec<_>>();
-    Ok(json!({ "entries": entries }))
+    Ok(json!({ "projectId": project_id, "entries": entries }))
 }

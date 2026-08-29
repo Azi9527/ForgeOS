@@ -552,9 +552,31 @@ pub(crate) async fn execute_ws_method(
         "projectLifecycle/get" => get_project_lifecycle_payload(state, &auth.profile_id, params)
             .await
             .map_err(anyhow::Error::from),
-        "projectLifecycle/audit/list" => list_project_audit_payload(state, params)
-            .await
-            .map_err(anyhow::Error::from),
+        "projectLifecycle/migration/get" => {
+            get_project_lifecycle_migration_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        "projectLifecycle/migration/commit" => {
+            commit_project_lifecycle_migration_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        "projectLifecycle/migration/rollback" => {
+            rollback_project_lifecycle_migration_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        "projectLifecycle/migration/recover" => {
+            recover_project_lifecycle_migration_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        "projectLifecycle/audit/list" => {
+            list_project_audit_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
         "projectLifecycle/validation/save" => {
             save_project_validation_payload(state, &auth.profile_id, params)
                 .await

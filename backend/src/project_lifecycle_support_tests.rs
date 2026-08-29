@@ -10,8 +10,9 @@ fn owner_auth() -> AuthContext {
 #[test]
 fn lifecycle_default_has_bounded_empty_sections() {
     assert_eq!(
-        lifecycle_default("ForgeOS"),
+        lifecycle_default("prj_forgeos", "ForgeOS"),
         json!({
+            "projectId": "prj_forgeos",
             "projectName": "ForgeOS",
             "revision": 0,
             "updatedAt": Value::Null,

@@ -71,6 +71,11 @@ fn default_ui_state_value() -> Value {
             "migrationCommitsByKey": {}
         },
         "projectLifecycleByName": {},
+        "projectLifecycleById": {},
+        "projectLifecycleMigration": {
+            "schemaVersion": 1,
+            "commitsByProjectId": {}
+        },
         "sessionMetaByThreadId": {},
         "savedSessionFilters": [],
         "promptPresets": [],
@@ -173,6 +178,7 @@ fn ensure_ui_state_sections(ui_state: &mut Value) {
     for (key, default_value) in [
         ("sessionFoldersByName", json!({})),
         ("projectLifecycleByName", json!({})),
+        ("projectLifecycleById", json!({})),
         ("sessionMetaByThreadId", json!({})),
         ("savedSessionFilters", json!([])),
         ("promptPresets", json!([])),
@@ -194,6 +200,31 @@ fn ensure_ui_state_sections(ui_state: &mut Value) {
         };
         if !is_valid {
             root.insert(key.to_string(), default_value);
+        }
+    }
+
+    if !root
+        .get("projectLifecycleMigration")
+        .is_some_and(Value::is_object)
+    {
+        root.insert(
+            "projectLifecycleMigration".to_string(),
+            json!({
+                "schemaVersion": 1,
+                "commitsByProjectId": {}
+            }),
+        );
+    }
+    if let Some(migration) = root
+        .get_mut("projectLifecycleMigration")
+        .and_then(Value::as_object_mut)
+    {
+        migration.insert("schemaVersion".to_string(), json!(1));
+        if !migration
+            .get("commitsByProjectId")
+            .is_some_and(Value::is_object)
+        {
+            migration.insert("commitsByProjectId".to_string(), json!({}));
         }
     }
 

@@ -53,8 +53,14 @@
   const latestPassedValidation = $derived(lifecycle?.validation.runs.find((run) => run.status === "passed") ?? null);
   const latestRelease = $derived(releases[0] ?? null);
 
+  function projectId() {
+    if (!project.projectId) throw new Error("项目尚未完成 Project Registry V2 注册，请先在项目中心导入或重建项目。");
+    return project.projectId;
+  }
+
   function emptyLifecycle(): ProjectLifecyclePayload {
     return {
+      projectId: project.projectId ?? "",
       projectName: project.name,
       revision: 0,
       updatedAt: null,
@@ -76,7 +82,7 @@
   }
 
   function storageKey() {
-    return `forgeos:project-lifecycle:v1:${(project.rootPath ?? project.name).toLocaleLowerCase()}`;
+    return `forgeos:project-lifecycle:v2:${project.projectId ?? "unregistered"}`;
   }
 
   function persistLocal(next: ProjectLifecyclePayload) {
@@ -96,7 +102,7 @@
   async function loadLifecycle() {
     error = "";
     try {
-      lifecycle = await api.getProjectLifecycle(project.name);
+      lifecycle = await api.getProjectLifecycle(projectId());
       persistenceMode = "gateway";
       persistLocal(lifecycle);
     } catch {
@@ -133,7 +139,7 @@
         }
       };
       lifecycle = persistenceMode === "gateway"
-        ? await api.saveProjectGovernance(project.name, governance, lifecycle.revision)
+        ? await api.saveProjectGovernance(projectId(), governance, lifecycle.revision)
         : { ...lifecycle, governance };
       persistLocal(lifecycle);
     });
@@ -146,7 +152,7 @@
       release: { artifacts: nextArtifacts.slice(0, 50), releases: nextReleases.slice(0, 30) }
     };
     lifecycle = persistenceMode === "gateway"
-      ? await api.saveProjectRelease(project.name, optimistic.release.artifacts, optimistic.release.releases, lifecycle.revision)
+      ? await api.saveProjectRelease(projectId(), optimistic.release.artifacts, optimistic.release.releases, lifecycle.revision)
       : optimistic;
     persistLocal(lifecycle);
   }
@@ -158,7 +164,7 @@
       operations: { environments: nextEnvironments.slice(0, 20), deployments: nextDeployments.slice(0, 50) }
     };
     lifecycle = persistenceMode === "gateway"
-      ? await api.saveProjectOperations(project.name, optimistic.operations.environments, optimistic.operations.deployments, lifecycle.revision)
+      ? await api.saveProjectOperations(projectId(), optimistic.operations.environments, optimistic.operations.deployments, lifecycle.revision)
       : optimistic;
     persistLocal(lifecycle);
   }
@@ -253,7 +259,7 @@
       if (!artifactVersion.trim() || !artifactFile) throw new Error("请选择制品文件并填写版本。");
       let artifact: ProjectArtifact;
       if (persistenceMode === "gateway") {
-        artifact = (await api.uploadProjectArtifact(project.name, artifactVersion.trim(), latestPassedValidation?.commit ?? null, artifactFile)).artifact;
+        artifact = (await api.uploadProjectArtifact(projectId(), artifactVersion.trim(), latestPassedValidation?.commit ?? null, artifactFile)).artifact;
       } else {
         const digest = await crypto.subtle.digest("SHA-256", await artifactFile.arrayBuffer());
         artifact = {
@@ -273,7 +279,7 @@
   function verifyArtifact(artifact: ProjectArtifact) {
     void mutate(async () => {
       if (persistenceMode !== "gateway") throw new Error("安装新版项目网关后才能执行服务端签名验证。");
-      const verified = (await api.verifyProjectArtifact(project.name, artifact.id)).artifact;
+      const verified = (await api.verifyProjectArtifact(projectId(), artifact.id)).artifact;
       await storeRelease(artifacts.map((item) => item.id === artifact.id ? verified : item), releases);
     });
   }
@@ -281,7 +287,7 @@
   function downloadArtifact(artifact: ProjectArtifact) {
     void mutate(async () => {
       if (persistenceMode !== "gateway") throw new Error("本机暂存制品没有可下载的网关文件。");
-      const downloaded = await api.downloadProjectArtifact(project.name, artifact.id);
+      const downloaded = await api.downloadProjectArtifact(projectId(), artifact.id);
       const url = URL.createObjectURL(downloaded.blob);
       const anchor = document.createElement("a");
       anchor.href = url;

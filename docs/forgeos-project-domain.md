@@ -1,7 +1,7 @@
 # ForgeOS Project Domain 与迁移方案
 
-状态：阶段一设计基线  
-目标阶段：Project Domain Consolidation  
+状态：Project Registry V2 与 Lifecycle ID Consolidation 实现基线
+目标阶段：Project Lifecycle ID Consolidation
 原则：Project 是 ForgeOS 的一级权威对象；Codex thread 是项目拥有的长期开发对话，不再反向充当项目身份。
 
 ## 1. 职责边界
@@ -116,6 +116,13 @@ projectRegistry
   projectsById
   projectIdByThreadId
   migrationCommitsByKey
+
+projectLifecycleById
+  <projectId>
+
+projectLifecycleMigration
+  schemaVersion: 1
+  commitsByProjectId
 ```
 
 这样可以在不引入第二套数据库或锁协议的情况下先建立稳定 `projectId`，同时继续输出
@@ -130,8 +137,9 @@ projects-v2/
     audit.jsonl
 ```
 
-迁移完成前继续读取现有 `sessionFolders` 和 `projectLifecycleByName`；所有新项目身份和对话
-归属写入 V2，同时维护 V1 兼容投影。稳定一个发布周期后再停止 V1 写入。
+`projectLifecycleByName` 现在只作为旧数据迁移来源保留。所有新的验证、制品、发布、部署和
+治理状态都写入 `projectLifecycleById`；制品目录、制品签名域、WebSocket 审计 target 和查询
+参数也统一使用 `projectId`。项目显示名称可以修改，但不会触发生命周期数据搬迁。
 
 ## 6. API 方向
 
@@ -146,13 +154,18 @@ project/import/commit
 project/conversation/list
 project/conversation/attach
 project/conversation/detach
-project/lifecycle/get
+projectLifecycle/get
+projectLifecycle/migration/get
+projectLifecycle/migration/commit
+projectLifecycle/migration/rollback
+projectLifecycle/migration/recover
 ```
 
 当前方法通过网关 WebSocket RPC 暴露；`project/list` 支持游标分页。文件系统路径由网关规范化并验证 allowed roots。
 
-第一阶段已实现：项目列表、读取、创建、更新、归档，迁移预览/提交，以及对话显式绑定、
-解绑和列表。`project/lifecycle/get` 仍沿用名称兼容层，属于下一阶段的生命周期 ID 化工作。
+当前已实现：项目列表、读取、创建、更新、归档，项目导入预览/提交，对话显式绑定，以及
+生命周期 ID 化。生命周期迁移采用“预览冲突 → 写入恢复日志 → 复制并重新签名旧制品 →
+原子切换 ID 状态”的流程；迁移中断时可恢复，迁移后未产生新写入时可回滚。
 
 ## 7. 现有数据迁移
 
@@ -191,13 +204,25 @@ project/lifecycle/get
 - 保留原数据和名称别名，生成审计事件；
 - 任一步失败时恢复迁移前快照。
 
+### 生命周期冲突策略
+
+- `preferLegacy`：以选定的旧名称记录为准，复制旧制品到 `projectId` 目录，并在校验旧摘要与
+  签名后以 V2 `projectId` 签名域重新签名；
+- `keepCurrent`：保留当前 ID 记录，只登记旧来源已处理；
+- 多个名称别名都存在旧数据时必须由操作者明确选择来源，不静默合并；
+- 迁移日志处于 `copying` 时界面显示“恢复未完成迁移”；
+- 回滚前校验生命周期 revision，迁移后已有新写入时拒绝回滚，防止丢失新数据。
+
 ## 8. 兼容与回滚
 
 - 不改写 Codex rollout 历史。
 - 不移动现有项目目录。
 - 不自动删除旧 SessionFolder 和 tag。
 - 迁移记录保存原名称、原目录和原生命周期键。
-- 回滚仅移除 V2 绑定并恢复 V1 投影，不删除迁移期间产生的源码和对话。
+- 回滚恢复迁移前的 ID 生命周期快照；若迁移前没有 ID 数据则移除该 ID 记录。
+- 旧名称状态和旧制品始终保留，回滚不删除源码、对话或审计日志。
+- 审计日志保持追加写，不重写历史名称记录；按项目查询时由网关使用项目别名兼容读取，
+  所有新审计记录以 `projectId` 作为 target。
 
 ## 9. 下一阶段验收标准
 
