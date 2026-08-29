@@ -832,11 +832,13 @@ fn migration_candidates(ui_state: &Value, sessions: &[Value]) -> Vec<Value> {
             .and_then(|session| session.get("cwd"))
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let name = PathBuf::from(root_path)
+        let root_path_buf = PathBuf::from(root_path);
+        let name = root_path_buf
             .file_name()
             .and_then(|value| value.to_str())
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or("Imported project");
+            .unwrap_or("Imported project")
+            .to_string();
         let digest = Sha256::digest(root_key.as_bytes());
         let key_suffix = digest
             .iter()
