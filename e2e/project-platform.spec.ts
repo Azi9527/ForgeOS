@@ -79,7 +79,7 @@ test("opens a project folder into release and operations workspaces", async ({ p
     const card = page.getByTestId("project-folder-card").filter({ hasText: projectName });
     await expect(card).toBeVisible();
     await expect(card).toHaveAttribute("data-project-id", projectId ?? "");
-    await card.getByRole("button", { name: "发布" }).click();
+    await card.getByRole("button", { name: "发布", exact: true }).click();
     await expect(page.getByTestId("project-navigation")).toBeVisible();
     await expect(page.getByTestId("project-release-workspace")).toBeVisible();
 
