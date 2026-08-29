@@ -161,10 +161,11 @@ test("opens a project folder into release and operations workspaces", async ({ p
   }
 });
 
-test("runs the real ForgeOS repository build through gateway validation and records audit", async ({ page }) => {
-  // The synchronous RPC retains a 30-minute server-side run budget. Keep the
-  // client deadline above that contract plus bounded cleanup and assertions.
-  test.setTimeout(1_980_000);
+test("validates the real ForgeOS build through the gateway and records audit evidence", async ({ page }) => {
+  // CI builds the production application immediately before this test. The
+  // gateway validates that exact output and runs the real frontend regression
+  // suite without deleting and rebuilding the files served by the live gateway.
+  test.setTimeout(300_000);
   await login(page);
 
   const repositoryRoot = process.cwd();
@@ -194,9 +195,9 @@ test("runs the real ForgeOS repository build through gateway validation and reco
       expectedRevision: initial.result?.revision,
       checks: [
         {
-          id: "build",
-          label: "ForgeOS 生产构建",
-          command: `pnpm --dir ${shellQuote(repositoryRoot)} build`,
+          id: "static-build",
+          label: "ForgeOS 构建制品校验",
+          command: `pnpm --dir ${shellQuote(repositoryRoot)} verify:static-build`,
           required: true
         },
         {
@@ -222,7 +223,7 @@ test("runs the real ForgeOS repository build through gateway validation and reco
     }>(page, "projectLifecycle/validation/run", {
       projectId,
       expectedRevision: configured.result?.revision
-    }, 1_860_000);
+    }, 240_000);
     expect(validated.ok, validated.error).toBeTruthy();
     const run = validated.result?.validation.runs[0];
     expect(run?.status).toBe("passed");
