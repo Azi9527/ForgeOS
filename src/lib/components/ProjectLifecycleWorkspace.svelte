@@ -7,7 +7,7 @@
   } from "lucide-svelte";
   import { api } from "$lib/api";
   import type {
-    ProjectArtifact, ProjectAuditEntry, ProjectDeployment, ProjectEnvironment,
+    ProjectArtifact, ProjectDeployment, ProjectEnvironment,
     ProjectGovernance, ProjectLifecyclePayload, ProjectRelease, SessionFolder
   } from "$lib/types";
 
@@ -21,7 +21,6 @@
   } = $props();
 
   let lifecycle = $state<ProjectLifecyclePayload | null>(null);
-  let auditEntries = $state<ProjectAuditEntry[]>([]);
   let persistenceMode = $state<"gateway" | "local" | "loading">("loading");
   let busy = $state(false);
   let error = $state("");
@@ -94,18 +93,6 @@
     }
   }
 
-  async function loadAudit() {
-    if (persistenceMode !== "gateway") {
-      auditEntries = [];
-      return;
-    }
-    try {
-      auditEntries = (await api.getProjectAudit(project.name, 100)).entries;
-    } catch {
-      auditEntries = [];
-    }
-  }
-
   async function loadLifecycle() {
     error = "";
     try {
@@ -124,7 +111,6 @@
     notifyReleaseCompleted = lifecycle.governance.notificationRoutes.releaseCompleted;
     notifyRollbackCompleted = lifecycle.governance.notificationRoutes.rollbackCompleted;
     notifyDeploymentFailed = lifecycle.governance.notificationRoutes.deploymentFailed;
-    await loadAudit();
   }
 
   function saveGovernance() {
@@ -183,7 +169,6 @@
     error = "";
     try {
       await action();
-      await loadAudit();
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
       if (error.toLocaleLowerCase().includes("changed")) await loadLifecycle();
@@ -430,18 +415,6 @@
     });
   }
 
-  function auditLabel(method: string) {
-    const labels: Record<string, string> = {
-      "projectLifecycle/validation/save": "更新验证方案",
-      "projectLifecycle/validation/record": "记录验证证据",
-      "projectLifecycle/governance/save": "更新项目治理策略",
-      "projectLifecycle/release/save": "变更发布状态",
-      "projectLifecycle/operations/save": "变更运维状态",
-      "projectArtifacts/upload": "上传并签名制品"
-    };
-    return labels[method] ?? method;
-  }
-
   onMount(() => { void loadLifecycle(); });
 </script>
 
@@ -593,13 +566,5 @@
         </div>
       </section>
     {/if}
-
-    <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-5">
-      <div class="flex items-center gap-2"><History class="text-violet-500" size={17} /><h2 class="text-sm font-bold text-slate-900">项目审计时间线</h2><span class="ml-auto text-xs text-slate-400">最近 {auditEntries.length} 条</span></div>
-      <div class="mt-4 space-y-2">
-        {#if persistenceMode !== "gateway"}<p class="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-700">当前运行的是旧网关兼容模式。安装新版 Windows 网关升级包后启用服务端审计时间线。</p>{:else if auditEntries.length === 0}<p class="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">暂无项目审计记录。</p>{/if}
-        {#each auditEntries as entry (entry.id)}<div class="flex items-start gap-3 rounded-xl border border-slate-200 px-4 py-3">{#if entry.ok}<CheckCircle2 class="mt-0.5 shrink-0 text-emerald-500" size={16} />{:else}<XCircle class="mt-0.5 shrink-0 text-red-500" size={16} />{/if}<div class="min-w-0 flex-1"><p class="text-sm font-bold text-slate-800">{auditLabel(entry.method)}</p><p class="mt-1 text-[11px] text-slate-400">{formatTime(entry.at)} · {entry.role}{entry.error ? ` · ${entry.error}` : ""}</p></div></div>{/each}
-      </div>
-    </section>
   </div>
 </section>

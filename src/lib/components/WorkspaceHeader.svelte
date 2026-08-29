@@ -59,6 +59,7 @@
     contextUsage,
     selectedSessionId,
     activeWorkspaceTabId,
+    projectMode = false,
     searchTriggerElement = $bindable(),
     sessionSearchOpen,
     showArchivedSessions,
@@ -102,6 +103,7 @@
     } | null;
     selectedSessionId: string | null;
     activeWorkspaceTabId: string;
+    projectMode?: boolean;
     searchTriggerElement?: HTMLButtonElement | undefined;
     sessionSearchOpen: boolean;
     showArchivedSessions: boolean;
@@ -199,7 +201,7 @@
   }
 </script>
 
-<header class="forge-workspace-header sticky top-0 z-40 flex items-center justify-between px-5 py-3 backdrop-blur-md sm:px-6">
+<header class:forge-workspace-header--project={projectMode} class="forge-workspace-header sticky top-0 z-40 flex items-center justify-between px-5 py-3 backdrop-blur-md sm:px-6">
   <div class="flex min-w-0 items-center gap-4">
     {#if isMobileLayout}
       <button class="-ml-2 rounded-lg p-2 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900" onclick={onOpenMobileSidebar} type="button">
@@ -208,7 +210,9 @@
     {/if}
 
     <div class="flex min-w-0 flex-col">
-      <p class="mb-0.5 hidden text-[8px] font-bold uppercase tracking-[0.22em] text-violet-500 sm:block">{ui.engineeringWorkspace}</p>
+      {#if !projectMode}
+        <p class="mb-0.5 hidden text-[8px] font-bold uppercase tracking-[0.22em] text-violet-500 sm:block">{ui.engineeringWorkspace}</p>
+      {/if}
       <div class="flex min-w-0 items-center gap-2">
         <input
           bind:this={titleInputElement}
@@ -233,7 +237,7 @@
           ></span>
         {/if}
       </div>
-      {#if selectedSessionSummary}
+      {#if selectedSessionSummary && !projectMode}
         <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
           {#if selectedSessionSummary.pinned}
             <span class="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700">
@@ -461,6 +465,14 @@
 
   .workspace-open-trigger:hover {
     background: linear-gradient(135deg, #7c6fff, #5b52ed);
+  }
+
+  .forge-workspace-header--project {
+    min-height: 3.25rem;
+    border-bottom: 0;
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+    background: rgba(255, 255, 255, 0.96);
   }
 
   .workspace-open-menu {
