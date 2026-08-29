@@ -318,6 +318,34 @@ fn validate_release_environment_binding(lifecycle: &Value, release: &Value) -> A
     Ok(())
 }
 
+fn legacy_targetless_release_is_unchanged(current: &Value, release: &Value) -> bool {
+    let release_id = release.get("id").and_then(Value::as_str);
+    let targetless = release
+        .get("targetEnvironmentId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_none_or(str::is_empty);
+    targetless
+        && current["release"]["releases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|existing| existing.get("id").and_then(Value::as_str) == release_id)
+            .is_some_and(|existing| existing == release)
+}
+
+fn validate_release_environment_upgrade(
+    current: &Value,
+    proposed: &Value,
+    release: &Value,
+) -> ApiResult<()> {
+    match validate_release_environment_binding(proposed, release) {
+        Ok(()) => Ok(()),
+        Err(_) if legacy_targetless_release_is_unchanged(current, release) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn validate_release_policy(
     lifecycle: &Value,
     release: &Value,
@@ -733,6 +761,74 @@ pub(crate) async fn get_project_lifecycle_payload(
     .await
 }
 
+fn redact_lifecycle_operator(value: &mut Value) {
+    if let Some(operator) = value.as_object_mut()
+        && operator.contains_key("profileId")
+    {
+        operator.insert("profileId".to_string(), json!("redacted"));
+    }
+}
+
+pub(crate) fn redact_project_lifecycle_for_viewer(lifecycle: &mut Value) {
+    for check in lifecycle["validation"]["checks"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        check["command"] = json!("");
+    }
+    for run in lifecycle["validation"]["runs"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        redact_lifecycle_operator(&mut run["operator"]);
+        for check in run["checks"].as_array_mut().into_iter().flatten() {
+            check["command"] = json!("");
+            check["output"] = json!("");
+        }
+    }
+    for artifact in lifecycle["release"]["artifacts"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        redact_lifecycle_operator(&mut artifact["createdBy"]);
+    }
+    for release in lifecycle["release"]["releases"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        for approval in release["approvals"].as_array_mut().into_iter().flatten() {
+            redact_lifecycle_operator(approval);
+        }
+    }
+    for environment in lifecycle["operations"]["environments"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        environment["deployCommand"] = Value::Null;
+        environment["healthCommand"] = Value::Null;
+        environment["lastHealthOutput"] = Value::Null;
+        if let Some(evidence) = environment.get_mut("lastHealthCheck")
+            && !evidence.is_null()
+        {
+            evidence["logs"] = Value::Null;
+            redact_lifecycle_operator(&mut evidence["operator"]);
+        }
+    }
+    for deployment in lifecycle["operations"]["deployments"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        deployment["logs"] = Value::Null;
+        redact_lifecycle_operator(&mut deployment["operator"]);
+    }
+}
+
 pub(crate) async fn update_project_lifecycle<F>(
     state: &AppState,
     profile_id: &str,
@@ -1052,8 +1148,10 @@ pub(crate) async fn save_project_release_payload(
                 .into_iter()
                 .flatten()
             {
-                validate_release_environment_binding(&proposed, release)?;
-                validate_release_policy(&proposed, release, owner_policy)?;
+                validate_release_environment_upgrade(lifecycle, &proposed, release)?;
+                if !legacy_targetless_release_is_unchanged(lifecycle, release) {
+                    validate_release_policy(&proposed, release, owner_policy)?;
+                }
             }
             proposed["retentionStatus"] = artifact_retention_status(&proposed);
             *lifecycle = proposed;
@@ -1181,7 +1279,7 @@ pub(crate) async fn save_project_operations_payload(
                 .into_iter()
                 .flatten()
             {
-                validate_release_environment_binding(&proposed, release)?;
+                validate_release_environment_upgrade(lifecycle, &proposed, release)?;
             }
             for deployment in proposed["operations"]["deployments"]
                 .as_array()
@@ -1208,6 +1306,20 @@ pub(crate) async fn save_project_operations_payload(
     )
     .await;
     Ok(updated)
+}
+
+pub(crate) async fn save_project_operations_compat_payload(
+    state: &AppState,
+    auth: &AuthContext,
+    params: Value,
+) -> ApiResult<Value> {
+    if params.get("deployments").is_some() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "ForgeOS client upgrade required: reload the workspace before running a deployment.",
+        ));
+    }
+    save_project_operations_payload(state, auth, params).await
 }
 
 pub(crate) async fn list_project_audit_payload(

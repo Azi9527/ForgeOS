@@ -549,9 +549,15 @@ pub(crate) async fn execute_ws_method(
                 .await
                 .map_err(anyhow::Error::from)
         }
-        "projectLifecycle/get" => get_project_lifecycle_payload(state, &auth.profile_id, params)
-            .await
-            .map_err(anyhow::Error::from),
+        "projectLifecycle/get" => {
+            let mut lifecycle = get_project_lifecycle_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)?;
+            if auth.role == UserRole::Viewer {
+                redact_project_lifecycle_for_viewer(&mut lifecycle);
+            }
+            Ok(lifecycle)
+        }
         "projectLifecycle/migration/get" => {
             get_project_lifecycle_migration_payload(state, &auth.profile_id, params)
                 .await
@@ -588,15 +594,22 @@ pub(crate) async fn execute_ws_method(
                 .await
                 .map_err(anyhow::Error::from)
         }
+        "projectLifecycle/validation/record" => {
+            run_legacy_project_validation_payload(state, auth, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
         "projectLifecycle/governance/save" => save_project_governance_payload(state, auth, params)
             .await
             .map_err(anyhow::Error::from),
         "projectLifecycle/release/save" => save_project_release_payload(state, auth, params)
             .await
             .map_err(anyhow::Error::from),
-        "projectLifecycle/operations/save" => save_project_operations_payload(state, auth, params)
-            .await
-            .map_err(anyhow::Error::from),
+        "projectLifecycle/operations/save" => {
+            save_project_operations_compat_payload(state, auth, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
         "projectLifecycle/deployment/run" => run_project_deployment_payload(state, auth, params)
             .await
             .map_err(anyhow::Error::from),

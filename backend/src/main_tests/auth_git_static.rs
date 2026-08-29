@@ -1777,10 +1777,12 @@ async fn health_readiness_and_metrics_endpoints_report_gateway_state() {
     let owner_handoff_response =
         handle_http(State(state.clone()), owner_jar, owner_handoff_request).await;
     assert_eq!(owner_handoff_response.status(), StatusCode::OK);
-    assert!(
+    assert_eq!(
         state
             .preserve_app_servers_on_shutdown
-            .load(Ordering::SeqCst)
+            .load(Ordering::SeqCst),
+        cfg!(unix),
+        "restart handoff preserves app servers only on supported Unix transports"
     );
 
     state
@@ -1795,10 +1797,12 @@ async fn health_readiness_and_metrics_endpoints_report_gateway_state() {
     let handoff_response =
         handle_http(State(state.clone()), CookieJar::new(), handoff_request).await;
     assert_eq!(handoff_response.status(), StatusCode::OK);
-    assert!(
+    assert_eq!(
         state
             .preserve_app_servers_on_shutdown
-            .load(Ordering::SeqCst)
+            .load(Ordering::SeqCst),
+        cfg!(unix),
+        "restart handoff preserves app servers only on supported Unix transports"
     );
 
     state
@@ -1821,10 +1825,12 @@ async fn health_readiness_and_metrics_endpoints_report_gateway_state() {
         .unwrap();
     let restart_response = handle_http(State(state.clone()), restart_jar, restart_request).await;
     assert_eq!(restart_response.status(), StatusCode::OK);
-    assert!(
+    assert_eq!(
         state
             .preserve_app_servers_on_shutdown
-            .load(Ordering::SeqCst)
+            .load(Ordering::SeqCst),
+        cfg!(unix),
+        "restart handoff preserves app servers only on supported Unix transports"
     );
     assert!(
         state.restart_plan.lock().await.is_none(),
@@ -1854,10 +1860,12 @@ async fn health_readiness_and_metrics_endpoints_report_gateway_state() {
             .and_then(Value::as_bool),
         Some(true)
     );
-    assert!(
+    assert_eq!(
         state
             .preserve_app_servers_on_shutdown
-            .load(Ordering::SeqCst)
+            .load(Ordering::SeqCst),
+        cfg!(unix),
+        "restart handoff preserves app servers only on supported Unix transports"
     );
 
     let _ = fs::remove_dir_all(sandbox);
@@ -1935,6 +1943,7 @@ fn viewer_websocket_permissions_are_session_observation_only() {
         "session/get",
         "project/list",
         "project/get",
+        "projectLifecycle/get",
         "projectLifecycle/migration/get",
         "projectLifecycle/audit/list",
         "session/olderTurns/get",
@@ -1964,7 +1973,6 @@ fn viewer_websocket_permissions_are_session_observation_only() {
         "terminal/list",
         "terminal/read",
         "gateway/restart",
-        "projectLifecycle/get",
         "projectLifecycle/migration/commit",
         "projectLifecycle/migration/rollback",
         "projectLifecycle/migration/recover",
@@ -2060,10 +2068,6 @@ async fn viewer_http_routes_match_websocket_authorization_policy() {
         (Method::POST, "/api/project-artifacts"),
         (
             Method::GET,
-            "/api/project-artifacts/verify?projectId=prj_test&artifactId=artifact-1",
-        ),
-        (
-            Method::GET,
             "/api/project-artifacts/download?projectId=prj_test&artifactId=artifact-1",
         ),
     ] {
@@ -2077,6 +2081,20 @@ async fn viewer_http_routes_match_websocket_authorization_policy() {
             response.status(),
             StatusCode::FORBIDDEN,
             "{method} {uri} should require admin access"
+        );
+    }
+
+    for uri in ["/api/project-artifacts/verify?projectId=prj_test&artifactId=artifact-1"] {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let response = handle_http(State(state.clone()), jar.clone(), request).await;
+        assert_ne!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "GET {uri} should remain available to authenticated viewers without exposing bytes"
         );
     }
 

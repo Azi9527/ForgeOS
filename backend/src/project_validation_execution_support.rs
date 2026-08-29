@@ -917,6 +917,18 @@ pub(crate) async fn run_project_validation_payload(
     .await
 }
 
+pub(crate) async fn run_legacy_project_validation_payload(
+    state: &AppState,
+    auth: &AuthContext,
+    _params: Value,
+) -> ApiResult<Value> {
+    require_validation_role(state, auth)?;
+    Err(api_error(
+        StatusCode::CONFLICT,
+        "UPGRADE_REQUIRED: Client-submitted validation evidence is no longer accepted. Refresh or upgrade the client, then run validation again through the project gateway.",
+    ))
+}
+
 pub(crate) async fn cancel_project_validation_payload(
     state: &AppState,
     auth: &AuthContext,

@@ -10,6 +10,22 @@ fn artifact_names_are_confined_to_a_single_file_name() {
 }
 
 #[test]
+fn artifact_text_metadata_is_bounded_before_persistence() {
+    assert_eq!(
+        bounded_artifact_text(b"  0.3.0-rc.1  ", "version", ARTIFACT_VERSION_MAX_BYTES).unwrap(),
+        "0.3.0-rc.1"
+    );
+    let error = bounded_artifact_text(
+        &vec![b'x'; ARTIFACT_SOURCE_COMMIT_MAX_BYTES + 1],
+        "sourceCommit",
+        ARTIFACT_SOURCE_COMMIT_MAX_BYTES,
+    )
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(error.message.contains("sourceCommit"));
+}
+
+#[test]
 fn artifact_project_keys_are_stable_and_do_not_expose_names() {
     let first = project_artifact_key("ForgeOS");
     assert_eq!(first, project_artifact_key("ForgeOS"));
@@ -97,4 +113,124 @@ async fn signing_key_reader_hardens_unix_permissions() {
         0o600
     );
     std::fs::remove_dir_all(root).expect("remove signing key test root");
+}
+
+fn artifact_multipart_body(
+    boundary: &str,
+    project_id: &str,
+    version: &str,
+    source_commit: &str,
+) -> String {
+    format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"projectId\"\r\n\r\n{project_id}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"version\"\r\n\r\n{version}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"sourceCommit\"\r\n\r\n{source_commit}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"forgeos.zip\"\r\nContent-Type: application/zip\r\n\r\nrelease-bytes\r\n\
+         --{boundary}--\r\n"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn artifact_http_upload_verifies_and_rejects_oversized_metadata() {
+    let root = std::env::temp_dir().join(format!("forgeos-artifact-http-{}", Uuid::new_v4()));
+    tokio_fs::create_dir_all(&root).await.unwrap();
+    let state =
+        crate::main_tests::test_state(root.clone(), vec![root.clone()], root.join("codex-home"));
+    let project_id = "prj_artifact_http";
+    let project_root = root.display().to_string();
+    with_ui_state_write(&state, "default", |ui_state| {
+        ui_state["projectRegistry"]["projectsById"][project_id] = json!({
+            "schemaVersion": 2,
+            "projectId": project_id,
+            "name": "Artifact HTTP Test",
+            "rootPath": project_root,
+            "status": "active",
+            "revision": 1
+        });
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let auth = AuthContext {
+        role: UserRole::Admin,
+        profile_id: "default".to_string(),
+    };
+    let boundary = "forgeos-artifact-boundary";
+    let body = artifact_multipart_body(boundary, project_id, "0.3.0-rc.1", "deadbeef");
+    let request = Request::builder()
+        .method(Method::POST)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = handle_project_artifacts_api_http(
+        state.clone(),
+        request,
+        auth.clone(),
+        "/api/project-artifacts",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&response_body).unwrap();
+    let artifact_id = payload["artifact"]["id"].as_str().unwrap();
+
+    let verify_request = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/project-artifacts/verify?projectId={project_id}&artifactId={artifact_id}"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let verify_response = handle_project_artifacts_api_http(
+        state.clone(),
+        verify_request,
+        AuthContext {
+            role: UserRole::Viewer,
+            profile_id: "default".to_string(),
+        },
+        "/api/project-artifacts/verify",
+    )
+    .await;
+    assert_eq!(verify_response.status(), StatusCode::OK);
+    let verify_body = to_bytes(verify_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let verified: Value = serde_json::from_slice(&verify_body).unwrap();
+    assert_eq!(verified["ok"], json!(true));
+    assert_eq!(verified["artifact"]["signatureVerified"], json!(true));
+    assert_eq!(
+        verified["artifact"]["createdBy"]["profileId"],
+        json!("redacted")
+    );
+
+    let oversized_version = "x".repeat(ARTIFACT_VERSION_MAX_BYTES + 1);
+    let oversized_body =
+        artifact_multipart_body(boundary, project_id, &oversized_version, "deadbeef");
+    let oversized_request = Request::builder()
+        .method(Method::POST)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(oversized_body))
+        .unwrap();
+    let oversized_response = handle_project_artifacts_api_http(
+        state.clone(),
+        oversized_request,
+        auth,
+        "/api/project-artifacts",
+    )
+    .await;
+    assert_eq!(oversized_response.status(), StatusCode::BAD_REQUEST);
+
+    let metadata_files = std::fs::read_dir(project_artifact_root(&state, "default", project_id))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .count();
+    assert_eq!(metadata_files, 1);
+    tokio_fs::remove_dir_all(root).await.unwrap();
 }

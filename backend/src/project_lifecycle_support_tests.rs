@@ -32,6 +32,76 @@ fn lifecycle_default_has_bounded_empty_sections() {
 }
 
 #[test]
+fn viewer_lifecycle_redaction_preserves_evidence_without_sensitive_details() {
+    let mut lifecycle = json!({
+        "validation": {
+            "checks": [{ "id": "build", "command": "secret-build" }],
+            "runs": [{
+                "operator": { "profileId": "owner-a", "role": "owner" },
+                "checks": [{ "command": "secret-build", "output": "secret-output" }]
+            }]
+        },
+        "release": {
+            "artifacts": [{ "createdBy": { "profileId": "owner-a", "role": "owner" } }],
+            "releases": [{
+                "approvals": [{ "profileId": "approver-a", "role": "admin", "approvedAt": 1 }]
+            }]
+        },
+        "operations": {
+            "environments": [{
+                "deployCommand": "secret-deploy",
+                "healthCommand": "secret-health",
+                "lastHealthOutput": "secret-health-output",
+                "lastHealthCheck": {
+                    "logs": "secret-health-log",
+                    "operator": { "profileId": "owner-a", "role": "owner" }
+                }
+            }],
+            "deployments": [{
+                "logs": "secret-deployment-log",
+                "operator": { "profileId": "owner-a", "role": "owner" }
+            }]
+        }
+    });
+
+    redact_project_lifecycle_for_viewer(&mut lifecycle);
+
+    assert_eq!(
+        lifecycle,
+        json!({
+            "validation": {
+                "checks": [{ "id": "build", "command": "" }],
+                "runs": [{
+                    "operator": { "profileId": "redacted", "role": "owner" },
+                    "checks": [{ "command": "", "output": "" }]
+                }]
+            },
+            "release": {
+                "artifacts": [{ "createdBy": { "profileId": "redacted", "role": "owner" } }],
+                "releases": [{
+                    "approvals": [{ "profileId": "redacted", "role": "admin", "approvedAt": 1 }]
+                }]
+            },
+            "operations": {
+                "environments": [{
+                    "deployCommand": Value::Null,
+                    "healthCommand": Value::Null,
+                    "lastHealthOutput": Value::Null,
+                    "lastHealthCheck": {
+                        "logs": Value::Null,
+                        "operator": { "profileId": "redacted", "role": "owner" }
+                    }
+                }],
+                "deployments": [{
+                    "logs": Value::Null,
+                    "operator": { "profileId": "redacted", "role": "owner" }
+                }]
+            }
+        })
+    );
+}
+
+#[test]
 fn governance_is_bounded_and_keeps_secure_production_minimums() {
     let governance = normalized_project_governance(Some(&json!({
         "approvalPolicy": { "standardApprovals": 0, "productionApprovals": 1 },
@@ -263,6 +333,40 @@ fn release_approval_states_require_an_existing_target_environment() {
     assert!(
         validate_release_environment_binding(&lifecycle, &json!({ "status": "draft" })).is_ok()
     );
+}
+
+#[test]
+fn unchanged_legacy_targetless_releases_survive_upgrade_without_allowing_mutation() {
+    let legacy = json!({
+        "id": "legacy-release",
+        "version": "0.1.0",
+        "artifactIds": [],
+        "status": "released",
+        "targetEnvironmentId": Value::Null,
+        "approvals": [],
+        "createdAt": 10,
+        "releasedAt": 20,
+        "rollbackOf": Value::Null
+    });
+    let current = json!({
+        "release": { "artifacts": [], "releases": [legacy.clone()] },
+        "operations": { "environments": [] }
+    });
+    let proposed = current.clone();
+    assert!(
+        validate_release_environment_upgrade(&current, &proposed, &legacy).is_ok(),
+        "an unchanged pre-upgrade record must not block unrelated lifecycle saves"
+    );
+
+    let mut changed = legacy.clone();
+    changed["version"] = json!("0.1.1");
+    assert!(validate_release_environment_upgrade(&current, &proposed, &changed).is_err());
+    let new_targetless = json!({
+        "id": "new-release",
+        "status": "awaitingApproval",
+        "targetEnvironmentId": Value::Null
+    });
+    assert!(validate_release_environment_upgrade(&current, &proposed, &new_targetless).is_err());
 }
 
 #[test]

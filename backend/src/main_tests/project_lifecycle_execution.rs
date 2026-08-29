@@ -150,6 +150,27 @@ async fn gateway_executes_deployments_and_health_checks_with_server_evidence() {
     .unwrap_err();
     assert_eq!(forged.status, StatusCode::CONFLICT);
 
+    let legacy_client = save_project_operations_compat_payload(
+        &state,
+        &auth,
+        json!({
+            "projectId": project_id,
+            "revision": checked["revision"],
+            "environments": checked["operations"]["environments"],
+            "deployments": [{
+                "id": "client-result",
+                "releaseId": "release-1",
+                "environmentId": "staging",
+                "status": "succeeded",
+                "exitCode": 0
+            }]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(legacy_client.status, StatusCode::CONFLICT);
+    assert!(legacy_client.message.contains("client upgrade required"));
+
     let viewer = AuthContext {
         role: UserRole::Viewer,
         profile_id: "default".to_string(),

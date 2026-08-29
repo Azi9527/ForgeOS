@@ -8,6 +8,28 @@ mod tests;
 const ARTIFACT_SIGNATURE_CONTEXT: &str = "forgeos-project-artifact-v2";
 const LEGACY_ARTIFACT_SIGNATURE_CONTEXT: &str = "forgeos-project-artifact-v1";
 const ARTIFACT_METADATA_MAX_BYTES: u64 = 64 * 1024;
+const ARTIFACT_PROJECT_ID_MAX_BYTES: usize = 128;
+const ARTIFACT_VERSION_MAX_BYTES: usize = 128;
+const ARTIFACT_SOURCE_COMMIT_MAX_BYTES: usize = 256;
+const ARTIFACT_ORIGINAL_NAME_MAX_BYTES: usize = 255;
+
+fn bounded_artifact_text(bytes: &[u8], field: &str, max_bytes: usize) -> ApiResult<String> {
+    if bytes.len() > max_bytes {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!("Artifact {field} must not exceed {max_bytes} bytes."),
+        ));
+    }
+    std::str::from_utf8(bytes)
+        .map(str::trim)
+        .map(str::to_string)
+        .map_err(|_| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                format!("Artifact {field} must be valid UTF-8."),
+            )
+        })
+}
 
 fn project_artifact_key(project_id: &str) -> String {
     Sha256::digest(project_id.trim().as_bytes())
@@ -33,6 +55,14 @@ fn sanitize_project_artifact_name(name: &str) -> String {
         "artifact.bin".to_string()
     } else {
         sanitized
+    }
+}
+
+fn redact_artifact_metadata_for_viewer(metadata: &mut Value) {
+    if let Some(created_by) = metadata.get_mut("createdBy").and_then(Value::as_object_mut)
+        && created_by.contains_key("profileId")
+    {
+        created_by.insert("profileId".to_string(), json!("redacted"));
     }
 }
 
@@ -459,10 +489,16 @@ pub(crate) async fn handle_project_artifacts_api_http(
     auth: AuthContext,
     route_path: &str,
 ) -> Response {
-    if !role_has_admin_access(auth.role) {
+    if route_path == "/api/project-artifacts/download"
+        && request.method() == Method::GET
+        && !role_has_admin_access(auth.role)
+    {
         return json_error(StatusCode::FORBIDDEN, "This action requires an admin role.");
     }
     if route_path == "/api/project-artifacts" && request.method() == Method::POST {
+        if !role_has_admin_access(auth.role) {
+            return json_error(StatusCode::FORBIDDEN, "This action requires an admin role.");
+        }
         if request
             .headers()
             .get(header::CONTENT_LENGTH)
@@ -488,18 +524,47 @@ pub(crate) async fn handle_project_artifacts_api_http(
             let field_name = field.name().unwrap_or_default().to_string();
             if field_name == "file" {
                 original_name = field.file_name().unwrap_or("artifact.bin").to_string();
+                if original_name.as_bytes().len() > ARTIFACT_ORIGINAL_NAME_MAX_BYTES {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "Artifact file name must not exceed 255 bytes.",
+                    );
+                }
                 match field.bytes().await {
                     Ok(bytes) => file_bytes = bytes.to_vec(),
                     Err(_) => {
                         return json_error(StatusCode::BAD_REQUEST, "Invalid artifact upload.");
                     }
                 }
-            } else if let Ok(value) = field.text().await {
-                match field_name.as_str() {
-                    "projectId" => project_id = value.trim().to_string(),
-                    "version" => version = value.trim().to_string(),
-                    "sourceCommit" => source_commit = value.trim().to_string(),
-                    _ => {}
+            } else if matches!(
+                field_name.as_str(),
+                "projectId" | "version" | "sourceCommit"
+            ) {
+                let bytes = match field.bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        return json_error(StatusCode::BAD_REQUEST, "Invalid artifact upload.");
+                    }
+                };
+                let result = match field_name.as_str() {
+                    "projectId" => {
+                        bounded_artifact_text(&bytes, "projectId", ARTIFACT_PROJECT_ID_MAX_BYTES)
+                            .map(|value| project_id = value)
+                    }
+                    "version" => {
+                        bounded_artifact_text(&bytes, "version", ARTIFACT_VERSION_MAX_BYTES)
+                            .map(|value| version = value)
+                    }
+                    "sourceCommit" => bounded_artifact_text(
+                        &bytes,
+                        "sourceCommit",
+                        ARTIFACT_SOURCE_COMMIT_MAX_BYTES,
+                    )
+                    .map(|value| source_commit = value),
+                    _ => unreachable!("known artifact metadata field"),
+                };
+                if let Err(error) = result {
+                    return json_error(error.status, &error.message);
                 }
             }
         }
@@ -577,13 +642,19 @@ pub(crate) async fn handle_project_artifacts_api_http(
                 "role": user_role_label(auth.role)
             }
         });
-        if let Err(error) = write_project_artifact_file(&file_path, &file_bytes).await {
-            return json_error(error.status, &error.message);
-        }
         let metadata_bytes = match serde_json::to_vec_pretty(&metadata) {
             Ok(bytes) => bytes,
             Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         };
+        if metadata_bytes.len() as u64 > ARTIFACT_METADATA_MAX_BYTES {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Project artifact metadata is too large.",
+            );
+        }
+        if let Err(error) = write_project_artifact_file(&file_path, &file_bytes).await {
+            return json_error(error.status, &error.message);
+        }
         if let Err(error) =
             write_project_artifact_file(&root.join(format!("{artifact_id}.json")), &metadata_bytes)
                 .await
@@ -621,11 +692,16 @@ pub(crate) async fn handle_project_artifacts_api_http(
         (&Method::GET, "/api/project-artifacts/verify") => {
             match verify_project_artifact(&state, &auth.profile_id, &project_id, &artifact_id).await
             {
-                Ok((metadata, _)) => Json(json!({
-                    "ok": true,
-                    "artifact": metadata
-                }))
-                .into_response(),
+                Ok((mut metadata, _)) => {
+                    if auth.role == UserRole::Viewer {
+                        redact_artifact_metadata_for_viewer(&mut metadata);
+                    }
+                    Json(json!({
+                        "ok": true,
+                        "artifact": metadata
+                    }))
+                    .into_response()
+                }
                 Err(error) => json_error(error.status, &error.message),
             }
         }

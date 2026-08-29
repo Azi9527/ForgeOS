@@ -140,6 +140,7 @@ async fn dedicated_owner_mode_blocks_admin_validation_and_allows_owner() {
         "projectLifecycle/validation/save",
         "projectLifecycle/validation/run",
         "projectLifecycle/validation/cancel",
+        "projectLifecycle/validation/record",
     ] {
         assert!(authorize_ws_method(&state.config, UserRole::Admin, method, &json!({})).is_ok());
     }
@@ -161,6 +162,7 @@ async fn dedicated_owner_mode_blocks_admin_validation_and_allows_owner() {
         "projectLifecycle/validation/save",
         "projectLifecycle/validation/run",
         "projectLifecycle/validation/cancel",
+        "projectLifecycle/validation/record",
     ] {
         assert!(
             authorize_ws_method(&state.config, UserRole::Admin, method, &json!({}))
@@ -350,6 +352,73 @@ async fn gateway_executes_saved_checks_and_atomically_records_server_evidence() 
     assert_eq!(run["configurationDigest"].as_str().map(str::len), Some(64));
     assert_eq!(run["evidenceDigest"].as_str().map(str::len), Some(64));
     assert!(run["finishedAt"].as_u64().unwrap() >= run["startedAt"].as_u64().unwrap());
+    let _ = tokio_fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn legacy_validation_record_requires_upgrade_without_execution_or_persistence() {
+    let (state, root, project_id) = state_with_project("legacy-record", false).await;
+    let marker = root.join("legacy-record-executed.txt");
+    let marker_command = if cfg!(windows) {
+        "Set-Content -LiteralPath 'legacy-record-executed.txt' -Value 'executed'"
+    } else {
+        "touch legacy-record-executed.txt"
+    };
+    let saved = save_checks(
+        &state,
+        &project_id,
+        json!([{
+            "id": "build",
+            "label": "Build",
+            "command": marker_command,
+            "required": true
+        }]),
+    )
+    .await;
+
+    let error = run_legacy_project_validation_payload(
+        &state,
+        &owner_auth(),
+        json!({
+            "projectId": project_id,
+            "revision": saved["revision"],
+            "run": {
+                "id": "forged-client-run",
+                "status": "passed",
+                "checks": [{
+                    "command": marker_command,
+                    "output": "forged-client-output"
+                }]
+            }
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert!(error.message.contains("UPGRADE_REQUIRED"));
+    assert!(error.message.to_ascii_lowercase().contains("refresh"));
+
+    assert!(
+        !marker.exists(),
+        "the legacy RPC must not execute any command"
+    );
+    let lifecycle =
+        get_project_lifecycle_payload(&state, "default", json!({ "projectId": project_id }))
+            .await
+            .unwrap();
+    assert_eq!(lifecycle["revision"], saved["revision"]);
+    assert_eq!(lifecycle["validation"]["runs"], json!([]));
+
+    let forbidden = run_legacy_project_validation_payload(
+        &state,
+        &viewer_auth(),
+        json!({ "projectId": project_id, "run": {} }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
+    assert!(!marker.exists());
+
     let _ = tokio_fs::remove_dir_all(root).await;
 }
 
