@@ -1167,6 +1167,15 @@ export const api = {
     return ws.request<{ ok: true; projectId: string; runId: string }>("projectLifecycle/validation/cancel", { projectId });
   },
 
+  acknowledgeProjectValidationCleanup(projectId: string, runId: string, expectedRevision: number) {
+    return ws.request<ProjectLifecyclePayload>("projectLifecycle/validation/acknowledgeCleanup", {
+      projectId,
+      runId,
+      expectedRevision,
+      acknowledgement: "I_HAVE_CONFIRMED_THE_VALIDATION_PROCESS_TREE_IS_STOPPED"
+    });
+  },
+
   saveProjectGovernance(projectId: string, governance: ProjectGovernance, revision: number | null = null) {
     return ws.request<ProjectLifecyclePayload>("projectLifecycle/governance/save", { projectId, governance, revision });
   },

@@ -1979,6 +1979,7 @@ fn viewer_websocket_permissions_are_session_observation_only() {
         "projectLifecycle/validation/save",
         "projectLifecycle/validation/run",
         "projectLifecycle/validation/cancel",
+        "projectLifecycle/validation/acknowledgeCleanup",
         "projectLifecycle/governance/save",
         "projectLifecycle/release/save",
         "projectLifecycle/operations/save",
@@ -2009,6 +2010,7 @@ fn project_lifecycle_audit_targets_the_stable_project_id() {
     for method in [
         "projectLifecycle/validation/save",
         "projectLifecycle/validation/run",
+        "projectLifecycle/validation/acknowledgeCleanup",
         "projectLifecycle/governance/save",
         "projectLifecycle/release/save",
         "projectLifecycle/operations/save",

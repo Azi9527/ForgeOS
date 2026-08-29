@@ -594,6 +594,11 @@ pub(crate) async fn execute_ws_method(
                 .await
                 .map_err(anyhow::Error::from)
         }
+        "projectLifecycle/validation/acknowledgeCleanup" => {
+            acknowledge_project_validation_cleanup_payload(state, auth, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
         "projectLifecycle/validation/record" => {
             run_legacy_project_validation_payload(state, auth, params)
                 .await

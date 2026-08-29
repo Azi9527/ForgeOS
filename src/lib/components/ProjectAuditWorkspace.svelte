@@ -28,6 +28,7 @@
       "projectLifecycle/validation/save": "更新验证方案",
       "projectLifecycle/validation/run": "网关执行项目验证",
       "projectLifecycle/validation/cancel": "停止项目验证",
+      "projectLifecycle/validation/acknowledgeCleanup": "确认验证进程已清理",
       "projectLifecycle/governance/save": "更新项目治理策略",
       "projectLifecycle/release/save": "变更发布状态",
       "projectLifecycle/operations/save": "变更环境配置",

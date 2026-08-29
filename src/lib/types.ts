@@ -181,6 +181,7 @@ export type ProjectValidationEvidence = ProjectValidationCheck & {
   exitCode: number | null;
   durationMs: number | null;
   output: string;
+  cleanupConfirmed?: boolean | null;
 };
 
 export type ProjectValidationRun = {
@@ -195,6 +196,9 @@ export type ProjectValidationRun = {
   checks: ProjectValidationEvidence[];
   operator: ProjectLifecycleOperator | null;
   evidenceDigest: string | null;
+  cleanupConfirmed?: boolean | null;
+  cleanupAcknowledgedAt?: number | null;
+  cleanupAcknowledgedBy?: ProjectLifecycleOperator | null;
 };
 
 export type ProjectArtifact = {

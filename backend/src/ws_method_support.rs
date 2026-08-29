@@ -53,6 +53,7 @@ pub(crate) fn ws_method_requires_owner(method: &str, params: &Value) -> bool {
             | "projectLifecycle/validation/save"
             | "projectLifecycle/validation/run"
             | "projectLifecycle/validation/cancel"
+            | "projectLifecycle/validation/acknowledgeCleanup"
             | "projectLifecycle/validation/record"
             | "projectLifecycle/governance/save"
             | "terminal/list"

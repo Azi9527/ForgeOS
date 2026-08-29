@@ -11,6 +11,8 @@ const MAX_VALIDATION_RUNS: usize = 20;
 const MAX_EVIDENCE_OUTPUT_BYTES: usize = 12_000;
 const VALIDATION_CHECK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const VALIDATION_RUN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const VALIDATION_PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+const VALIDATION_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ValidationCheckConfig {
@@ -41,12 +43,27 @@ struct ValidationCommandResult {
     exit_code: Option<i32>,
     duration_ms: u64,
     output: String,
+    cleanup_confirmed: bool,
 }
 
 #[derive(Debug)]
 struct CapturedPipe {
     bytes: Vec<u8>,
     truncated: bool,
+    drain_confirmed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ValidationCleanupAttempt {
+    termination_requested: bool,
+    direct_process_reaped: bool,
+}
+
+#[derive(Debug)]
+struct ValidationChecksExecution {
+    evidence: Vec<Value>,
+    cleanup_confirmed: bool,
+    run_timed_out: bool,
 }
 
 #[derive(Clone)]
@@ -164,6 +181,59 @@ fn require_validation_cancel_params(params: &Value) -> ApiResult<String> {
     require_lifecycle_project_id(params)
 }
 
+const VALIDATION_CLEANUP_ACKNOWLEDGEMENT: &str =
+    "I_HAVE_CONFIRMED_THE_VALIDATION_PROCESS_TREE_IS_STOPPED";
+
+fn require_validation_cleanup_acknowledgement_params(
+    params: &Value,
+) -> ApiResult<(String, String, u64)> {
+    reject_unsupported_params(
+        params,
+        &["projectId", "runId", "expectedRevision", "acknowledgement"],
+    )?;
+    let project_id = require_lifecycle_project_id(params)?;
+    let run_id = params
+        .get("runId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "runId is required"))?;
+    let expected_revision = params
+        .get("expectedRevision")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "expectedRevision is required"))?;
+    if params.get("acknowledgement").and_then(Value::as_str)
+        != Some(VALIDATION_CLEANUP_ACKNOWLEDGEMENT)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Explicit validation cleanup acknowledgement is required.",
+        ));
+    }
+    Ok((project_id, run_id.to_string(), expected_revision))
+}
+
+fn validation_cleanup_is_pending(run: &Value) -> bool {
+    run.get("cleanupConfirmed").and_then(Value::as_bool) == Some(false)
+        && run.get("cleanupAcknowledgedAt").is_none_or(Value::is_null)
+}
+
+fn require_no_validation_cleanup_quarantine(lifecycle: &Value) -> ApiResult<()> {
+    if lifecycle["validation"]["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(validation_cleanup_is_pending)
+    {
+        Err(api_error(
+            StatusCode::CONFLICT,
+            "VALIDATION_CLEANUP_REQUIRED: A previous validation process tree could not be confirmed stopped. An owner must verify the project processes and explicitly acknowledge cleanup before another validation run.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validation_check_config(value: &Value) -> ApiResult<Option<ValidationCheckConfig>> {
     let id = value
         .get("id")
@@ -265,6 +335,7 @@ async fn validation_snapshot(
             })?;
         let lifecycle = lifecycle_from_state(ui_state, project_id, project_name);
         require_expected_revision(&lifecycle, expected_revision)?;
+        require_no_validation_cleanup_quarantine(&lifecycle)?;
         let persisted_checks = lifecycle["validation"]["checks"].clone();
         let checks = configured_validation_checks(&persisted_checks)?;
         let configuration_digest =
@@ -395,7 +466,11 @@ where
         }
         bytes.extend_from_slice(&chunk[..count]);
     }
-    Ok(CapturedPipe { bytes, truncated })
+    Ok(CapturedPipe {
+        bytes,
+        truncated,
+        drain_confirmed: true,
+    })
 }
 
 fn bounded_output_tail(value: &str) -> String {
@@ -428,52 +503,116 @@ fn combined_validation_output(stdout: CapturedPipe, stderr: CapturedPipe) -> Str
     bounded_output_tail(&combined)
 }
 
-async fn terminate_validation_process(pid: Option<u32>) {
+async fn run_validation_termination_command(program: &str, args: Vec<String>) -> bool {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.status().await.is_ok_and(|status| status.success())
+}
+
+async fn terminate_validation_process(pid: Option<u32>) -> bool {
     let Some(pid) = pid else {
-        return;
+        return false;
     };
     #[cfg(windows)]
     {
-        let _ = run_command_with_timeout(
-            "taskkill",
+        return run_validation_termination_command(
+            "taskkill.exe",
             vec![
                 "/PID".to_string(),
                 pid.to_string(),
                 "/T".to_string(),
                 "/F".to_string(),
             ],
-            Duration::from_secs(4),
         )
         .await;
     }
     #[cfg(unix)]
     {
         let group = format!("-{pid}");
-        let _ = run_command_with_timeout(
+        let term_requested = run_validation_termination_command(
             "kill",
             vec!["-TERM".to_string(), "--".to_string(), group.clone()],
-            Duration::from_secs(4),
         )
         .await;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let _ = run_command_with_timeout(
+        let kill_requested = run_validation_termination_command(
             "kill",
             vec!["-KILL".to_string(), "--".to_string(), group],
-            Duration::from_secs(4),
         )
         .await;
+        term_requested || kill_requested
+    }
+}
+
+async fn terminate_and_reap_validation_process(
+    child: &mut tokio::process::Child,
+    pid: Option<u32>,
+    cleanup_timeout: Duration,
+) -> ValidationCleanupAttempt {
+    let started = Instant::now();
+    let direct_reap_reserve = cleanup_timeout.min(Duration::from_secs(4)) / 2;
+    let termination_budget = cleanup_timeout.saturating_sub(direct_reap_reserve);
+    let termination_requested =
+        tokio::time::timeout(termination_budget, terminate_validation_process(pid))
+            .await
+            .unwrap_or(false);
+    let remaining = cleanup_timeout.saturating_sub(started.elapsed());
+    let direct_reaped = matches!(
+        tokio::time::timeout(remaining, child.wait()).await,
+        Ok(Ok(_))
+    );
+    if direct_reaped {
+        return ValidationCleanupAttempt {
+            termination_requested,
+            direct_process_reaped: true,
+        };
+    }
+    let _ = child.start_kill();
+    let remaining = cleanup_timeout.saturating_sub(started.elapsed());
+    let direct_reaped = matches!(
+        tokio::time::timeout(remaining, child.wait()).await,
+        Ok(Ok(_))
+    );
+    ValidationCleanupAttempt {
+        termination_requested,
+        direct_process_reaped: direct_reaped,
     }
 }
 
 async fn captured_pipe_result(
-    task: tokio::task::JoinHandle<std::io::Result<CapturedPipe>>,
+    task: Option<tokio::task::JoinHandle<std::io::Result<CapturedPipe>>>,
+    drain_timeout: Duration,
 ) -> CapturedPipe {
-    match tokio::time::timeout(Duration::from_secs(2), task).await {
-        Ok(Ok(Ok(captured))) => captured,
-        Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => CapturedPipe {
+    let Some(mut task) = task else {
+        return CapturedPipe {
             bytes: Vec::new(),
             truncated: false,
+            drain_confirmed: false,
+        };
+    };
+    let abort_reserve = drain_timeout.min(Duration::from_millis(200)) / 2;
+    let read_timeout = drain_timeout.saturating_sub(abort_reserve);
+    match tokio::time::timeout(read_timeout, &mut task).await {
+        Ok(Ok(Ok(captured))) => captured,
+        Ok(Ok(Err(_))) | Ok(Err(_)) => CapturedPipe {
+            bytes: Vec::new(),
+            truncated: false,
+            drain_confirmed: false,
         },
+        Err(_) => {
+            task.abort();
+            let _ = tokio::time::timeout(abort_reserve, &mut task).await;
+            CapturedPipe {
+                bytes: Vec::new(),
+                truncated: false,
+                drain_confirmed: false,
+            }
+        }
     }
 }
 
@@ -482,6 +621,8 @@ async fn run_validation_command(
     command_text: &str,
     cancellation: &CancellationToken,
     timeout: Duration,
+    cleanup_timeout: Duration,
+    pipe_drain_timeout: Duration,
 ) -> ValidationCommandResult {
     let started = Instant::now();
     if cancellation.is_cancelled() {
@@ -490,6 +631,7 @@ async fn run_validation_command(
             exit_code: None,
             duration_ms: 0,
             output: "Validation cancelled by the operator before the command started.".to_string(),
+            cleanup_confirmed: true,
         };
     }
     let mut command = validation_command(command_text);
@@ -512,6 +654,7 @@ async fn run_validation_command(
                 exit_code: Some(-1),
                 duration_ms: started.elapsed().as_millis() as u64,
                 output: format!("Failed to start the saved validation command: {error}"),
+                cleanup_confirmed: true,
             };
         }
     };
@@ -536,26 +679,35 @@ async fn run_validation_command(
         result = child.wait() => WaitResult::Completed(result),
         _ = tokio::time::sleep(timeout) => WaitResult::TimedOut,
     };
-    if !matches!(wait_result, WaitResult::Completed(_)) {
-        terminate_validation_process(pid).await;
-        let _ = child.wait().await;
-    }
+    let cleanup_attempt = match &wait_result {
+        WaitResult::Completed(Ok(_)) => None,
+        WaitResult::Completed(Err(_)) | WaitResult::Cancelled | WaitResult::TimedOut => {
+            Some(terminate_and_reap_validation_process(&mut child, pid, cleanup_timeout).await)
+        }
+    };
 
-    let stdout = match stdout {
-        Some(task) => captured_pipe_result(task).await,
-        None => CapturedPipe {
-            bytes: Vec::new(),
-            truncated: false,
-        },
-    };
-    let stderr = match stderr {
-        Some(task) => captured_pipe_result(task).await,
-        None => CapturedPipe {
-            bytes: Vec::new(),
-            truncated: false,
-        },
-    };
-    let captured = combined_validation_output(stdout, stderr);
+    let (stdout, stderr) = tokio::join!(
+        captured_pipe_result(stdout, pipe_drain_timeout),
+        captured_pipe_result(stderr, pipe_drain_timeout)
+    );
+    let pipes_drained = stdout.drain_confirmed && stderr.drain_confirmed;
+    let mut captured = combined_validation_output(stdout, stderr);
+    if let Some(attempt) = cleanup_attempt {
+        let separator = if captured.is_empty() { "" } else { "\n" };
+        let cleanup_evidence = if attempt.termination_requested && attempt.direct_process_reaped {
+            "Validation process-tree cleanup was requested and the direct command process exited, but complete process-tree cleanup could not be independently confirmed; the project is quarantined from further validation until an owner acknowledges cleanup."
+        } else {
+            "Validation process tree cleanup could not be confirmed before the cleanup deadline; the project is quarantined from further validation until an owner acknowledges cleanup."
+        };
+        captured = bounded_output_tail(&format!("{captured}{separator}{cleanup_evidence}"));
+    }
+    if !pipes_drained {
+        let separator = if captured.is_empty() { "" } else { "\n" };
+        captured = bounded_output_tail(&format!(
+            "{captured}{separator}Validation output pipes did not close before the drain deadline; a descendant process may still be running, so cleanup could not be confirmed."
+        ));
+    }
+    let cleanup_confirmed = cleanup_attempt.is_none() && pipes_drained;
     let duration_ms = started.elapsed().as_millis() as u64;
     match wait_result {
         WaitResult::Completed(Ok(status)) => ValidationCommandResult {
@@ -567,6 +719,7 @@ async fn run_validation_command(
             exit_code: Some(status.code().unwrap_or(1)),
             duration_ms,
             output: captured,
+            cleanup_confirmed,
         },
         WaitResult::Completed(Err(error)) => ValidationCommandResult {
             status: ValidationCommandStatus::Failed,
@@ -575,6 +728,7 @@ async fn run_validation_command(
             output: bounded_output_tail(&format!(
                 "{captured}\nFailed to wait for the saved validation command: {error}"
             )),
+            cleanup_confirmed,
         },
         WaitResult::Cancelled => ValidationCommandResult {
             status: ValidationCommandStatus::Cancelled,
@@ -583,14 +737,16 @@ async fn run_validation_command(
             output: bounded_output_tail(&format!(
                 "{captured}\nValidation cancelled by the operator."
             )),
+            cleanup_confirmed,
         },
         WaitResult::TimedOut => ValidationCommandResult {
             status: ValidationCommandStatus::Failed,
             exit_code: Some(124),
             duration_ms,
             output: bounded_output_tail(&format!(
-                "{captured}\nValidation command exceeded its server timeout and was terminated."
+                "{captured}\nValidation command exceeded its server timeout; process-tree cleanup was requested."
             )),
+            cleanup_confirmed,
         },
     }
 }
@@ -604,7 +760,8 @@ fn pending_validation_evidence(check: &ValidationCheckConfig) -> Value {
         "status": "pending",
         "exitCode": Value::Null,
         "durationMs": Value::Null,
-        "output": ""
+        "output": "",
+        "cleanupConfirmed": Value::Null
     })
 }
 
@@ -619,18 +776,22 @@ fn apply_command_result(evidence: &mut Value, result: ValidationCommandResult) {
     evidence["output"] = json!(bounded_output_tail(&redact_engineering_evidence(
         &result.output
     )));
+    evidence["cleanupConfirmed"] = json!(result.cleanup_confirmed);
 }
 
 async fn execute_validation_checks(
     root: &Path,
     checks: &[ValidationCheckConfig],
     cancellation: &CancellationToken,
-) -> Vec<Value> {
+    run_timeout: Duration,
+) -> ValidationChecksExecution {
     let started = Instant::now();
     let mut evidence = checks
         .iter()
         .map(pending_validation_evidence)
         .collect::<Vec<_>>();
+    let mut cleanup_confirmed = true;
+    let mut run_timed_out = false;
     for (index, check) in checks.iter().enumerate() {
         if cancellation.is_cancelled() {
             for pending in &mut evidence[index..] {
@@ -639,12 +800,13 @@ async fn execute_validation_checks(
             }
             break;
         }
-        let Some(remaining) = VALIDATION_RUN_TIMEOUT.checked_sub(started.elapsed()) else {
+        let Some(remaining) = run_timeout.checked_sub(started.elapsed()) else {
             evidence[index]["status"] = json!("failed");
             evidence[index]["exitCode"] = json!(124);
             evidence[index]["durationMs"] = json!(0);
             evidence[index]["output"] =
                 json!("The project validation run exceeded its server timeout.");
+            run_timed_out = true;
             break;
         };
         let result = run_validation_command(
@@ -652,9 +814,13 @@ async fn execute_validation_checks(
             &check.command,
             cancellation,
             remaining.min(VALIDATION_CHECK_TIMEOUT),
+            VALIDATION_PROCESS_CLEANUP_TIMEOUT,
+            VALIDATION_PIPE_DRAIN_TIMEOUT,
         )
         .await;
         let status = result.status;
+        let check_cleanup_confirmed = result.cleanup_confirmed;
+        cleanup_confirmed &= check_cleanup_confirmed;
         apply_command_result(&mut evidence[index], result);
         if status == ValidationCommandStatus::Cancelled {
             for pending in &mut evidence[index + 1..] {
@@ -663,19 +829,33 @@ async fn execute_validation_checks(
             }
             break;
         }
+        if !check_cleanup_confirmed {
+            break;
+        }
         if check.required && status == ValidationCommandStatus::Failed {
             break;
         }
     }
-    evidence
+    ValidationChecksExecution {
+        evidence,
+        cleanup_confirmed,
+        run_timed_out,
+    }
 }
 
-fn validation_run_status(checks: &[Value]) -> &'static str {
+fn validation_run_status(
+    checks: &[Value],
+    cleanup_confirmed: bool,
+    run_timed_out: bool,
+) -> &'static str {
     if checks
         .iter()
         .any(|check| check.get("status").and_then(Value::as_str) == Some("cancelled"))
     {
         return "cancelled";
+    }
+    if run_timed_out || !cleanup_confirmed {
+        return "failed";
     }
     if checks.iter().any(|check| {
         check
@@ -712,6 +892,9 @@ fn finalize_validation_run(mut run: Value) -> ApiResult<Value> {
 fn interrupted_validation_run(mut run: Value, finished_at: u64) -> ApiResult<Value> {
     run["status"] = json!("interrupted");
     run["finishedAt"] = json!(finished_at);
+    run["cleanupConfirmed"] = json!(false);
+    run["cleanupAcknowledgedAt"] = Value::Null;
+    run["cleanupAcknowledgedBy"] = Value::Null;
     if let Some(checks) = run.get_mut("checks").and_then(Value::as_array_mut) {
         for check in checks {
             if let Some(output) = check.get("output").and_then(Value::as_str) {
@@ -833,7 +1016,10 @@ pub(crate) async fn run_project_validation_payload(
             .iter()
             .map(pending_validation_evidence)
             .collect::<Vec<_>>(),
-        "operator": auth_operator(auth)
+        "operator": auth_operator(auth),
+        "cleanupConfirmed": Value::Null,
+        "cleanupAcknowledgedAt": Value::Null,
+        "cleanupAcknowledgedBy": Value::Null
     }))?;
     let expected_root_path = snapshot.root_path.clone();
     let expected_checks = snapshot.persisted_checks.clone();
@@ -872,8 +1058,18 @@ pub(crate) async fn run_project_validation_payload(
     )
     .await?;
 
-    let check_evidence = execute_validation_checks(&root, &snapshot.checks, &cancellation).await;
-    let status = validation_run_status(&check_evidence);
+    let execution = execute_validation_checks(
+        &root,
+        &snapshot.checks,
+        &cancellation,
+        VALIDATION_RUN_TIMEOUT,
+    )
+    .await;
+    let status = validation_run_status(
+        &execution.evidence,
+        execution.cleanup_confirmed,
+        execution.run_timed_out,
+    );
     let run = finalize_validation_run(json!({
         "id": run_id,
         "startedAt": started_at,
@@ -883,8 +1079,11 @@ pub(crate) async fn run_project_validation_payload(
         "branch": branch,
         "commit": commit,
         "configurationDigest": snapshot.configuration_digest,
-        "checks": check_evidence,
-        "operator": auth_operator(auth)
+        "checks": execution.evidence,
+        "operator": auth_operator(auth),
+        "cleanupConfirmed": execution.cleanup_confirmed,
+        "cleanupAcknowledgedAt": Value::Null,
+        "cleanupAcknowledgedBy": Value::Null
     }))?;
 
     let run_id_for_update = run_id.clone();
@@ -915,6 +1114,53 @@ pub(crate) async fn run_project_validation_payload(
         },
     )
     .await
+}
+
+pub(crate) async fn acknowledge_project_validation_cleanup_payload(
+    state: &AppState,
+    auth: &AuthContext,
+    params: Value,
+) -> ApiResult<Value> {
+    require_validation_role(state, auth)?;
+    let (project_id, run_id, expected_revision) =
+        require_validation_cleanup_acknowledgement_params(&params)?;
+    let acknowledged_at = now_unix_ms();
+    let acknowledged_by = auth_operator(auth);
+    let run_id_for_update = run_id.clone();
+    let lifecycle = update_project_lifecycle(
+        state,
+        &auth.profile_id,
+        json!({
+            "projectId": project_id,
+            "expectedRevision": expected_revision
+        }),
+        move |lifecycle, _params, _project| {
+            let runs = lifecycle["validation"]["runs"]
+                .as_array_mut()
+                .ok_or_else(|| {
+                    api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Project validation runs state is invalid.",
+                    )
+                })?;
+            let run = runs
+                .iter_mut()
+                .find(|run| run.get("id").and_then(Value::as_str) == Some(&run_id_for_update))
+                .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Validation run was not found."))?;
+            if !validation_cleanup_is_pending(run) {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "The validation run does not have a pending process-tree cleanup quarantine.",
+                ));
+            }
+            run["cleanupAcknowledgedAt"] = json!(acknowledged_at);
+            run["cleanupAcknowledgedBy"] = acknowledged_by;
+            *run = finalize_validation_run(run.clone())?;
+            Ok(())
+        },
+    )
+    .await?;
+    Ok(lifecycle)
 }
 
 pub(crate) async fn run_legacy_project_validation_payload(

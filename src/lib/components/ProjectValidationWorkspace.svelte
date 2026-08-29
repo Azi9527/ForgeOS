@@ -16,6 +16,7 @@
   } from "lucide-svelte";
 
   import { api } from "$lib/api";
+  import { findProjectValidationCleanupQuarantine } from "$lib/project-validation-state";
   import type {
     ProjectValidationCheck as ValidationCheck,
     ProjectValidationRun as ValidationRun,
@@ -30,6 +31,7 @@
   let expandedRunId = $state<string | null>(null);
   let running = $state(false);
   let cancelling = $state(false);
+  let acknowledgingCleanup = $state(false);
   let error = $state("");
   let persistenceMode = $state<"gateway" | "error" | "loading">("loading");
   let lifecycleRevision = $state<number | null>(null);
@@ -40,6 +42,7 @@
   const latestRun = $derived(runs[0] ?? null);
   const gatewayRunning = $derived(latestRun?.status === "running");
   const passedCount = $derived(latestRun?.checks.filter((check) => check.status === "passed").length ?? 0);
+  const cleanupQuarantine = $derived(findProjectValidationCleanupQuarantine(runs));
 
   function projectId() {
     if (!project.projectId) throw new Error("项目尚未完成 Project Registry V2 注册，请先在项目中心导入或重建项目。");
@@ -134,7 +137,7 @@
   }
 
   async function runValidation() {
-    if (running || gatewayRunning || readOnly || persistenceMode !== "gateway" || lifecycleRevision === null) return;
+    if (running || gatewayRunning || readOnly || persistenceMode !== "gateway" || lifecycleRevision === null || cleanupQuarantine) return;
     if (!project.rootPath) {
       error = "请先在项目设置中绑定根目录。";
       return;
@@ -170,17 +173,47 @@
     const targetProjectId = projectId();
     try {
       await api.cancelProjectValidation(targetProjectId);
-      for (let attempt = 0; attempt < 40; attempt += 1) {
+      let terminal = false;
+      for (let attempt = 0; attempt < 120; attempt += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 250));
         const lifecycle = await api.getProjectLifecycle(targetProjectId);
         if (project.projectId !== targetProjectId) return;
         applyLifecycle(lifecycle);
-        if (lifecycle.validation.runs[0]?.status !== "running") break;
+        if (lifecycle.validation.runs[0]?.status !== "running") {
+          terminal = true;
+          break;
+        }
+      }
+      if (!terminal) {
+        error = "验证仍在后台执行清理，请稍后刷新项目验证状态；在清理完成前不要启动新的验证。";
       }
     } catch (cause) {
       await handleMutationFailure("验证停止请求失败", cause, targetProjectId);
     } finally {
       cancelling = false;
+    }
+  }
+
+  async function acknowledgeValidationCleanup() {
+    if (readOnly || acknowledgingCleanup || persistenceMode !== "gateway" || lifecycleRevision === null || !cleanupQuarantine) return;
+    const confirmed = window.confirm(
+      "只有在你已通过任务管理器或运维工具确认上一条验证命令及其所有子进程均已停止后，才可解除隔离。解除操作会写入项目审计记录。是否继续？"
+    );
+    if (!confirmed) return;
+
+    acknowledgingCleanup = true;
+    error = "";
+    const targetProjectId = projectId();
+    const expectedRevision = lifecycleRevision;
+    const runId = cleanupQuarantine.id;
+    try {
+      const lifecycle = await api.acknowledgeProjectValidationCleanup(targetProjectId, runId, expectedRevision);
+      if (project.projectId !== targetProjectId) return;
+      applyLifecycle(lifecycle);
+    } catch (cause) {
+      await handleMutationFailure("验证进程隔离未解除", cause, targetProjectId);
+    } finally {
+      acknowledgingCleanup = false;
     }
   }
 
@@ -207,6 +240,7 @@
     expandedRunId = null;
     running = false;
     cancelling = false;
+    acknowledgingCleanup = false;
     error = "";
     if (!targetProjectId) {
       persistenceMode = "error";
@@ -231,12 +265,19 @@
         {#if running || gatewayRunning}
           <button class="inline-flex h-10 items-center gap-2 rounded-xl bg-red-600 px-4 text-sm font-bold text-white disabled:opacity-50" disabled={cancelling} onclick={cancelValidation} type="button"><Square size={14} />{cancelling ? "正在停止" : "停止验证"}</button>
         {:else}
-          <button class="inline-flex h-10 items-center gap-2 rounded-xl bg-violet-600 px-4 text-sm font-bold text-white disabled:opacity-50" data-testid="validation-run" disabled={readOnly || gatewayRunning || persistenceMode !== "gateway" || lifecycleRevision === null || configuredChecks.length === 0} onclick={runValidation} type="button"><Play size={15} />运行验证</button>
+          <button class="inline-flex h-10 items-center gap-2 rounded-xl bg-violet-600 px-4 text-sm font-bold text-white disabled:opacity-50" data-testid="validation-run" disabled={readOnly || gatewayRunning || persistenceMode !== "gateway" || lifecycleRevision === null || configuredChecks.length === 0 || cleanupQuarantine !== null} onclick={runValidation} type="button"><Play size={15} />运行验证</button>
         {/if}
       </div>
     </header>
 
     {#if error}<div class="mt-5 flex items-center gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"><AlertCircle size={16} />{error}</div>{/if}
+
+    {#if cleanupQuarantine}
+      <section class="mt-5 flex flex-col gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-4 text-sm text-amber-950 sm:flex-row sm:items-center sm:justify-between" data-testid="validation-cleanup-quarantine">
+        <div class="flex min-w-0 items-start gap-3"><AlertCircle class="mt-0.5 shrink-0 text-amber-600" size={17} /><div><p class="font-bold">项目验证已进入进程隔离</p><p class="mt-1 text-xs leading-5 text-amber-800">网关未能在硬截止前确认运行 {cleanupQuarantine.id} 的完整进程树已停止。为防止残留进程污染新证据，网关重启后仍会阻止再次验证。</p></div></div>
+        <button class="shrink-0 rounded-xl border border-amber-400 bg-white px-4 py-2 text-xs font-bold text-amber-900 disabled:opacity-50" disabled={readOnly || acknowledgingCleanup || lifecycleRevision === null} onclick={acknowledgeValidationCleanup} type="button">{acknowledgingCleanup ? "正在解除" : "确认已清理并解除隔离"}</button>
+      </section>
+    {/if}
 
     {#if configurationOpen}
       <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm" data-testid="validation-configuration">

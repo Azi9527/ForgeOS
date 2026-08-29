@@ -45,6 +45,14 @@ fn long_running_command() -> &'static str {
     }
 }
 
+fn in_process_long_running_command() -> &'static str {
+    if cfg!(windows) {
+        "while ($true) { Start-Sleep -Milliseconds 50 }"
+    } else {
+        "while :; do :; done"
+    }
+}
+
 fn check(id: &str, command: &str, required: bool) -> ValidationCheckConfig {
     ValidationCheckConfig {
         id: id.to_string(),
@@ -140,6 +148,7 @@ async fn dedicated_owner_mode_blocks_admin_validation_and_allows_owner() {
         "projectLifecycle/validation/save",
         "projectLifecycle/validation/run",
         "projectLifecycle/validation/cancel",
+        "projectLifecycle/validation/acknowledgeCleanup",
         "projectLifecycle/validation/record",
     ] {
         assert!(authorize_ws_method(&state.config, UserRole::Admin, method, &json!({})).is_ok());
@@ -162,6 +171,7 @@ async fn dedicated_owner_mode_blocks_admin_validation_and_allows_owner() {
         "projectLifecycle/validation/save",
         "projectLifecycle/validation/run",
         "projectLifecycle/validation/cancel",
+        "projectLifecycle/validation/acknowledgeCleanup",
         "projectLifecycle/validation/record",
     ] {
         assert!(
@@ -258,6 +268,7 @@ fn validation_output_redacts_credentials_before_digesting_evidence() {
             exit_code: Some(1),
             duration_ms: 10,
             output: "Bearer top-secret sk-example password=hunter2 api_key=private".to_string(),
+            cleanup_confirmed: true,
         },
     );
     let output = evidence["output"].as_str().unwrap();
@@ -278,15 +289,18 @@ async fn required_check_failure_stops_later_commands() {
         Uuid::new_v4()
     ));
     tokio_fs::create_dir_all(&root).await.unwrap();
-    let evidence = execute_validation_checks(
+    let execution = execute_validation_checks(
         &root,
         &[
             check("required", failing_command(), true),
             check("not-run", successful_command(), true),
         ],
         &CancellationToken::new(),
+        VALIDATION_RUN_TIMEOUT,
     )
     .await;
+    let evidence = execution.evidence;
+    assert!(execution.cleanup_confirmed);
     assert_eq!(
         evidence
             .iter()
@@ -300,6 +314,250 @@ async fn required_check_failure_stops_later_commands() {
             .as_str()
             .unwrap()
             .contains("validation-failed")
+    );
+    let _ = tokio_fs::remove_dir_all(root).await;
+}
+
+#[test]
+fn unconfirmed_cleanup_makes_an_optional_failure_fatal() {
+    let evidence = vec![
+        json!({
+            "required": false,
+            "status": "failed",
+            "cleanupConfirmed": false
+        }),
+        json!({
+            "required": true,
+            "status": "pending",
+            "cleanupConfirmed": Value::Null
+        }),
+    ];
+
+    assert_eq!(validation_run_status(&evidence, false, false), "failed");
+}
+
+#[tokio::test]
+async fn exhausted_run_budget_is_fatal_for_an_optional_check() {
+    let root = std::env::temp_dir().join(format!(
+        "codex-webui-validation-run-budget-{}",
+        Uuid::new_v4()
+    ));
+    tokio_fs::create_dir_all(&root).await.unwrap();
+    let execution = execute_validation_checks(
+        &root,
+        &[check("optional", successful_command(), false)],
+        &CancellationToken::new(),
+        Duration::ZERO,
+    )
+    .await;
+
+    assert!(execution.run_timed_out);
+    assert_eq!(execution.evidence[0]["status"], json!("failed"));
+    assert_eq!(execution.evidence[0]["exitCode"], json!(124));
+    assert_eq!(
+        validation_run_status(
+            &execution.evidence,
+            execution.cleanup_confirmed,
+            execution.run_timed_out
+        ),
+        "failed"
+    );
+    let _ = tokio_fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn validation_timeout_returns_with_truthful_unconfirmed_cleanup_evidence() {
+    let root = std::env::temp_dir().join(format!(
+        "codex-webui-validation-hard-timeout-{}",
+        Uuid::new_v4()
+    ));
+    tokio_fs::create_dir_all(&root).await.unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        run_validation_command(
+            &root,
+            in_process_long_running_command(),
+            &CancellationToken::new(),
+            Duration::from_millis(30),
+            Duration::ZERO,
+            Duration::from_millis(100),
+        ),
+    )
+    .await
+    .expect("validation timeout cleanup must have a hard upper bound");
+
+    assert_eq!(result.status, ValidationCommandStatus::Failed);
+    assert_eq!(result.exit_code, Some(124));
+    assert!(!result.cleanup_confirmed);
+    assert!(result.output.contains("cleanup could not be confirmed"));
+    assert!(result.output.contains("cleanup was requested"));
+    assert!(!result.output.contains("was terminated"));
+    let _ = tokio_fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn timed_out_pipe_reader_is_aborted_instead_of_detached() {
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let (dropped_sender, dropped_receiver) = tokio::sync::oneshot::channel();
+    let reader = tokio::spawn(async move {
+        let _drop_signal = DropSignal(Some(dropped_sender));
+        let _ = started_sender.send(());
+        std::future::pending::<std::io::Result<CapturedPipe>>().await
+    });
+    started_receiver.await.unwrap();
+
+    let captured = captured_pipe_result(Some(reader), Duration::from_millis(100)).await;
+    assert_eq!(captured.bytes, Vec::<u8>::new());
+    assert!(!captured.truncated);
+    assert!(!captured.drain_confirmed);
+    tokio::time::timeout(Duration::from_secs(1), dropped_receiver)
+        .await
+        .expect("aborted pipe reader should be dropped")
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn completed_command_with_an_open_descendant_pipe_is_quarantined() {
+    let root = std::env::temp_dir().join(format!(
+        "codex-webui-validation-open-pipe-{}",
+        Uuid::new_v4()
+    ));
+    tokio_fs::create_dir_all(&root).await.unwrap();
+
+    let result = run_validation_command(
+        &root,
+        "sleep 1 &",
+        &CancellationToken::new(),
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+        Duration::from_millis(30),
+    )
+    .await;
+
+    assert_eq!(result.status, ValidationCommandStatus::Passed);
+    assert!(!result.cleanup_confirmed);
+    assert!(result.output.contains("output pipes did not close"));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let _ = tokio_fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn unconfirmed_cleanup_quarantines_validation_until_owner_acknowledgement() {
+    let (state, root, project_id) = state_with_project("cleanup-quarantine", false).await;
+    let saved = save_checks(
+        &state,
+        &project_id,
+        json!([{
+            "id": "build",
+            "label": "Build",
+            "command": successful_command(),
+            "required": true
+        }]),
+    )
+    .await;
+    let quarantined_run = finalize_validation_run(json!({
+        "id": "validation_cleanup_pending",
+        "startedAt": 10,
+        "finishedAt": 20,
+        "status": "failed",
+        "rootPath": root.display().to_string(),
+        "branch": Value::Null,
+        "commit": Value::Null,
+        "configurationDigest": "a".repeat(64),
+        "checks": [],
+        "operator": auth_operator(&owner_auth()),
+        "cleanupConfirmed": false,
+        "cleanupAcknowledgedAt": Value::Null,
+        "cleanupAcknowledgedBy": Value::Null
+    }))
+    .unwrap();
+    let quarantined = update_project_lifecycle(
+        &state,
+        "default",
+        json!({
+            "projectId": project_id,
+            "expectedRevision": saved["revision"]
+        }),
+        move |lifecycle, _params, _project| {
+            lifecycle["validation"]["runs"] = json!([quarantined_run]);
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+
+    let blocked = run_project_validation_payload(
+        &state,
+        &owner_auth(),
+        json!({
+            "projectId": project_id,
+            "expectedRevision": quarantined["revision"]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(blocked.status, StatusCode::CONFLICT);
+    assert!(blocked.message.contains("VALIDATION_CLEANUP_REQUIRED"));
+
+    let bad_acknowledgement = acknowledge_project_validation_cleanup_payload(
+        &state,
+        &owner_auth(),
+        json!({
+            "projectId": project_id,
+            "runId": "validation_cleanup_pending",
+            "expectedRevision": quarantined["revision"],
+            "acknowledgement": "not-confirmed"
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(bad_acknowledgement.status, StatusCode::BAD_REQUEST);
+
+    let acknowledged = acknowledge_project_validation_cleanup_payload(
+        &state,
+        &owner_auth(),
+        json!({
+            "projectId": project_id,
+            "runId": "validation_cleanup_pending",
+            "expectedRevision": quarantined["revision"],
+            "acknowledgement": VALIDATION_CLEANUP_ACKNOWLEDGEMENT
+        }),
+    )
+    .await
+    .unwrap();
+    let acknowledged_run = &acknowledged["validation"]["runs"][0];
+    assert_eq!(acknowledged_run["cleanupConfirmed"], json!(false));
+    assert!(acknowledged_run["cleanupAcknowledgedAt"].as_u64().is_some());
+    assert_eq!(
+        acknowledged_run["cleanupAcknowledgedBy"],
+        auth_operator(&owner_auth())
+    );
+
+    let completed = run_project_validation_payload(
+        &state,
+        &owner_auth(),
+        json!({
+            "projectId": project_id,
+            "expectedRevision": acknowledged["revision"]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        completed["validation"]["runs"][0]["status"],
+        json!("passed")
     );
     let _ = tokio_fs::remove_dir_all(root).await;
 }
@@ -424,7 +682,7 @@ async fn legacy_validation_record_requires_upgrade_without_execution_or_persiste
 
 #[tokio::test]
 async fn lifecycle_read_recovers_gateway_restart_running_evidence_as_interrupted() {
-    let (state, root, project_id) = state_with_project("interrupted", false).await;
+    let (mut state, root, project_id) = state_with_project("interrupted", false).await;
     let saved = save_checks(
         &state,
         &project_id,
@@ -488,6 +746,65 @@ async fn lifecycle_read_recovers_gateway_restart_running_evidence_as_interrupted
     );
     assert!(!run.to_string().contains("recovery-secret-token"));
     assert_eq!(run["evidenceDigest"].as_str().map(str::len), Some(64));
+    assert_eq!(run["cleanupConfirmed"], json!(false));
+
+    let blocked = run_project_validation_payload(
+        &state,
+        &owner_auth(),
+        json!({
+            "projectId": project_id,
+            "expectedRevision": recovered["revision"]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(blocked.status, StatusCode::CONFLICT);
+    assert!(blocked.message.contains("VALIDATION_CLEANUP_REQUIRED"));
+
+    let mut config = (*state.config).clone();
+    config.require_owner_role = true;
+    state.config = Arc::new(config);
+    let admin_acknowledgement = acknowledge_project_validation_cleanup_payload(
+        &state,
+        &admin_auth(),
+        json!({
+            "projectId": project_id,
+            "runId": "validation_interrupted",
+            "expectedRevision": recovered["revision"],
+            "acknowledgement": VALIDATION_CLEANUP_ACKNOWLEDGEMENT
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(admin_acknowledgement.status, StatusCode::FORBIDDEN);
+
+    let acknowledged = acknowledge_project_validation_cleanup_payload(
+        &state,
+        &owner_auth(),
+        json!({
+            "projectId": project_id,
+            "runId": "validation_interrupted",
+            "expectedRevision": recovered["revision"],
+            "acknowledgement": VALIDATION_CLEANUP_ACKNOWLEDGEMENT
+        }),
+    )
+    .await
+    .unwrap();
+    let completed = run_project_validation_payload(
+        &state,
+        &owner_auth(),
+        json!({
+            "projectId": project_id,
+            "expectedRevision": acknowledged["revision"]
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        completed["validation"]["runs"][0]["status"],
+        json!("passed")
+    );
+
     let audit = list_audit_log(&state.config, 20).await.unwrap();
     assert!(audit["entries"].as_array().unwrap().iter().any(|entry| {
         entry["role"] == json!("system")
@@ -584,13 +901,14 @@ async fn active_gateway_validation_can_be_cancelled_and_is_recorded_as_cancelled
     .unwrap();
     assert_eq!(cancelled["ok"], json!(true));
 
-    let result = tokio::time::timeout(Duration::from_secs(10), run)
+    let result = tokio::time::timeout(Duration::from_secs(20), run)
         .await
         .expect("cancelled validation should stop promptly")
         .unwrap()
         .unwrap();
     let evidence = &result["validation"]["runs"][0];
     assert_eq!(evidence["status"], json!("cancelled"));
+    assert_eq!(evidence["cleanupConfirmed"], json!(false));
     assert_eq!(evidence["checks"][0]["status"], json!("cancelled"));
     assert_eq!(evidence["checks"][0]["exitCode"], Value::Null);
     assert_eq!(
