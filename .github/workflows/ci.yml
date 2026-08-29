@@ -50,7 +50,9 @@ jobs:
           pnpm verify:api-parity
 
       - name: Test gateway data backup and restore
-        run: pnpm test:gateway-data
+        run: |
+          pnpm test:gateway-start-lock
+          pnpm test:gateway-data
 
       - name: Test viewer route authorization
         working-directory: backend
@@ -75,6 +77,13 @@ jobs:
       - name: Test attachment retention
         working-directory: backend
         run: cargo test main_tests::attachments_and_recovery::attachment_cleanup_retains_recent_orphans_until_min_age
+
+      - name: Test Unix project execution and evidence paths
+        working-directory: backend
+        run: |
+          cargo test project_lifecycle_execution
+          cargo test project_validation_execution
+          cargo test project_operation_command_support
 
       - name: Test tunnel safety
         run: pnpm verify:tunnel-safety
@@ -126,6 +135,8 @@ jobs:
           cargo test --manifest-path backend/Cargo.toml project_lifecycle_execution
           cargo test --manifest-path backend/Cargo.toml project_validation_execution
           cargo test --manifest-path backend/Cargo.toml project_artifact_support
+          cargo test --manifest-path backend/Cargo.toml project_operation_command_support
+          pnpm test:gateway-start-lock
           pnpm test:gateway-release
           pnpm test:gateway-data
 

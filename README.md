@@ -166,15 +166,16 @@ Install the published operator package globally, or run its primary command
 without a permanent installation:
 
 ```bash
-npm install --global forgeos-platform
+npm install --global codex-webui
 forgeos
 
 # One-shot alternative
-npx --package forgeos-platform forgeos
+npx --package codex-webui forgeos
 ```
 
-`codex-webui` remains available only as a compatibility alias for existing
-automation. New scripts and operator runbooks should use `forgeos`.
+The published package coordinate remains `codex-webui` for upgrade compatibility.
+`forgeos` is the primary product command; `codex-webui` remains a compatibility
+alias for existing automation.
 
 On first run the CLI:
 

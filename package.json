@@ -1,5 +1,5 @@
 {
-  "name": "forgeos-platform",
+  "name": "codex-webui",
   "private": false,
   "version": "0.3.0-rc.1",
   "description": "ForgeOS enterprise AI-native application development, release, and operations platform built on the OpenAI Codex runtime.",
@@ -26,6 +26,7 @@
     "dist/backend",
     "docs",
     "scripts/gateway-data-backup.mjs",
+    "scripts/gateway-start-lock.mjs",
     "scripts/gateway-release.mjs",
     "README.md",
     ".env.example"
@@ -49,6 +50,7 @@
     "test:ws-client-backpressure": "node --test ./scripts/ws-client-backpressure.test.mjs",
     "test:gateway-release": "node --test ./scripts/gateway-release.test.mjs",
     "test:gateway-data": "node --test ./scripts/gateway-data-backup.test.mjs",
+    "test:gateway-start-lock": "node --test ./scripts/gateway-start-lock.test.mjs",
     "gateway:data": "node ./scripts/gateway-data-backup.mjs",
     "gateway:bundle": "node ./scripts/create-gateway-bundle.mjs",
     "gateway:dev": "setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all cargo run --manifest-path backend/Cargo.toml",

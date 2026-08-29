@@ -20,6 +20,7 @@ import {
   waitForGatewayReadiness,
   writeGatewayReleaseState
 } from "../scripts/gateway-release.mjs";
+import { acquireGatewayStartLock } from "../scripts/gateway-start-lock.mjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stateDir = path.join(os.homedir(), ".codex", "codex-webui");
@@ -32,35 +33,6 @@ const tunnelPidPath = path.join(stateDir, "tunnel.pid");
 const tunnelLogPath = path.join(stateDir, "tunnel.log");
 const tunnelMetaPath = path.join(stateDir, "tunnel.json");
 const GATEWAY_READINESS_TIMEOUT_MS = 30_000;
-
-async function acquireGatewayStartLock() {
-  await fs.mkdir(stateDir, { recursive: true });
-  const nonce = randomBytes(24).toString("base64url");
-  let handle;
-  try {
-    handle = await fs.open(dataMaintenanceLockPath, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify({ pid: process.pid, nonce, operation: "gateway-start" })}\n`);
-    await handle.sync();
-  } catch (error) {
-    await handle?.close().catch(() => {});
-    if (error?.code === "EEXIST") {
-      throw new Error("Gateway data backup or restore is active; refusing to start the gateway.");
-    }
-    throw error;
-  }
-  await handle.close();
-  return async () => {
-    let current;
-    try {
-      current = JSON.parse(await fs.readFile(dataMaintenanceLockPath, "utf8"));
-    } catch {
-      return;
-    }
-    if (current?.nonce === nonce) {
-      await fs.rm(dataMaintenanceLockPath, { force: true });
-    }
-  };
-}
 
 function runtimeErrorLogPath(config) {
   return path.join(config.dataDir, "logs", "runtime-errors.jsonl");
@@ -1285,7 +1257,9 @@ async function startServerUnlocked(config) {
 }
 
 async function startServer(config) {
-  const releaseStartLock = await acquireGatewayStartLock();
+  const releaseStartLock = await acquireGatewayStartLock({
+    lockPath: dataMaintenanceLockPath
+  });
   try {
     return await startServerUnlocked(config);
   } finally {

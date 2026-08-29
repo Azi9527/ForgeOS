@@ -5,7 +5,7 @@
 The intended user-facing entrypoint is:
 
 ```bash
-npx --package forgeos-platform forgeos
+npx --package codex-webui forgeos
 ```
 
 That implies the published package must be able to:
