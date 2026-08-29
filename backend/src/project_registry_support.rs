@@ -87,7 +87,7 @@ fn registry_from_ui_state(ui_state: &Value) -> Option<&serde_json::Map<String, V
     ui_state.get("projectRegistry").and_then(Value::as_object)
 }
 
-fn project_record(ui_state: &Value, project_id: &str) -> Option<Value> {
+pub(crate) fn project_record(ui_state: &Value, project_id: &str) -> Option<Value> {
     registry_from_ui_state(ui_state)?
         .get("projectsById")?
         .as_object()?
@@ -610,6 +610,21 @@ pub(crate) async fn update_project_v2_payload(
         let now = now_unix_ms();
         let mut next = current.as_object().cloned().unwrap_or_default();
         next.insert("name".to_string(), Value::String(next_name.clone()));
+        if current_name != next_name {
+            let mut aliases = current
+                .get("aliases")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if !aliases
+                .iter()
+                .any(|alias| alias.as_str() == Some(current_name.as_str()))
+            {
+                aliases.push(Value::String(current_name.clone()));
+            }
+            aliases.truncate(20);
+            next.insert("aliases".to_string(), Value::Array(aliases));
+        }
         next.insert("rootPath".to_string(), Value::String(next_root));
         if let Some(repository_root) = repository_root_patch.clone() {
             next.insert(

@@ -113,6 +113,7 @@ jobs:
         run: |
           cargo test --manifest-path backend/Cargo.toml project_registry_support
           cargo test --manifest-path backend/Cargo.toml project_lifecycle_support
+          cargo test --manifest-path backend/Cargo.toml project_lifecycle_migration_support
           cargo test --manifest-path backend/Cargo.toml project_artifact_support
           pnpm test:gateway-release
 

@@ -48,6 +48,11 @@
   const latestRun = $derived(runs[0] ?? null);
   const passedCount = $derived(latestRun?.checks.filter((check) => check.status === "passed").length ?? 0);
 
+  function projectId() {
+    if (!project.projectId) throw new Error("项目尚未完成 Project Registry V2 注册，请先在项目中心导入或重建项目。");
+    return project.projectId;
+  }
+
   function defaultChecks(): ValidationCheck[] {
     return [
       { id: "build", label: "项目构建", command: "", required: true },
@@ -57,8 +62,7 @@
   }
 
   function storageKey() {
-    const identity = project.rootPath ?? project.name;
-    return `forgeos:project-validation:v1:${identity.toLocaleLowerCase()}`;
+    return `forgeos:project-validation:v2:${project.projectId ?? "unregistered"}`;
   }
 
   function persist() {
@@ -88,7 +92,7 @@
     persist();
     if (persistenceMode === "gateway") {
       try {
-        const lifecycle = await api.saveProjectValidation(project.name, checks, lifecycleRevision);
+        const lifecycle = await api.saveProjectValidation(projectId(), checks, lifecycleRevision);
         lifecycleRevision = lifecycle.revision;
         checks = lifecycle.validation.checks;
       } catch (cause) {
@@ -248,7 +252,7 @@
       updateActiveRun({ ...run, checks: [...run.checks] });
       if (persistenceMode === "gateway") {
         try {
-          const lifecycle = await api.recordProjectValidation(project.name, run, lifecycleRevision);
+          const lifecycle = await api.recordProjectValidation(projectId(), run, lifecycleRevision);
           lifecycleRevision = lifecycle.revision;
           checks = lifecycle.validation.checks.length > 0 ? lifecycle.validation.checks : checks;
           runs = lifecycle.validation.runs;
@@ -273,7 +277,7 @@
 
   async function restoreLifecycle() {
     try {
-      const lifecycle = await api.getProjectLifecycle(project.name);
+      const lifecycle = await api.getProjectLifecycle(projectId());
       lifecycleRevision = lifecycle.revision;
       if (lifecycle.validation.checks.length > 0) checks = lifecycle.validation.checks;
       runs = lifecycle.validation.runs;

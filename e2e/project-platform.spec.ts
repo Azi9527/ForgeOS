@@ -96,6 +96,12 @@ test("opens a project folder into release and operations workspaces", async ({ p
     await page.getByTestId("validation-run").click({ timeout: 15_000 });
     await expect(page.getByTestId("validation-history").getByText("验证通过").first()).toBeVisible({ timeout: 30_000 });
 
+    await projectNavigation.getByRole("button", { name: "设置", exact: true }).click({ timeout: 15_000 });
+    const migrationPanel = page.getByTestId("project-lifecycle-migration");
+    await expect(migrationPanel).toBeVisible();
+    await expect(migrationPanel).toContainText(projectId ?? "");
+    await expect(migrationPanel).toContainText("已使用 projectId，无旧数据需要迁移");
+
     await projectNavigation.getByRole("button", { name: "AI 开发", exact: true }).click({ timeout: 15_000 });
     await expect(page.getByTestId("composer-input")).toBeVisible();
 

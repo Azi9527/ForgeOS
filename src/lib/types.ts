@@ -198,6 +198,7 @@ export type ProjectValidationRun = {
 
 export type ProjectArtifact = {
   id: string;
+  projectId?: string;
   name: string;
   version: string;
   sourceCommit: string | null;
@@ -271,6 +272,7 @@ export type ProjectGovernance = {
 };
 
 export type ProjectLifecyclePayload = {
+  projectId: string;
   projectName: string;
   revision: number;
   updatedAt: number | null;
@@ -283,6 +285,38 @@ export type ProjectLifecyclePayload = {
     protectedCount: number;
     automaticDeletion: false;
   };
+};
+
+export type ProjectLifecycleMigrationSource = {
+  projectName: string;
+  revision: number;
+  digest: string;
+  validationRuns: number;
+  artifacts: number;
+  releases: number;
+  deployments: number;
+};
+
+export type ProjectLifecycleMigrationPayload = {
+  schemaVersion: 1;
+  projectId: string;
+  projectName: string;
+  status: "notRequired" | "ready" | "conflict" | "alreadyConsolidated" | "migrated" | "recoveryRequired" | "rolledBack";
+  legacySources: ProjectLifecycleMigrationSource[];
+  current: { revision: number; digest: string } | null;
+  commit: {
+    migrationId: string;
+    sourceProjectName: string;
+    strategy: "preferLegacy" | "keepCurrent";
+    status: "copying" | "applied" | "rolledBack";
+    startedAt: number;
+    appliedAt: number | null;
+    rolledBackAt: number | null;
+    appliedRevision?: number;
+  } | null;
+  canMigrate: boolean;
+  canRollback: boolean;
+  canRecover: boolean;
 };
 
 export type ProjectAuditEntry = {

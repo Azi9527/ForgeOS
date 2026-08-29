@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { AlertTriangle, FolderCog, GitBranch, MessageSquare, Pencil, Save, Search, Trash2 } from "lucide-svelte";
+  import { AlertTriangle, DatabaseZap, FolderCog, GitBranch, MessageSquare, Pencil, RefreshCw, RotateCcw, Save, Search, ShieldCheck, Trash2 } from "lucide-svelte";
 
+  import { api } from "$lib/api";
   import { getLocale } from "$lib/paraglide/runtime.js";
-  import type { ModelOption, SessionFolder, SessionSummary } from "$lib/types";
+  import type { ModelOption, ProjectLifecycleMigrationPayload, SessionFolder, SessionSummary } from "$lib/types";
 
   let {
     project,
@@ -34,6 +35,11 @@
   let mutationBusy = $state(false);
   let error = $state("");
   let preview = $state<"rename" | "remove" | null>(null);
+  let lifecycleMigration = $state<ProjectLifecycleMigrationPayload | null>(null);
+  let lifecycleMigrationBusy = $state(false);
+  let lifecycleMigrationError = $state("");
+  let lifecycleSourceName = $state("");
+  let lifecycleStrategy = $state<"preferLegacy" | "keepCurrent">("preferLegacy");
 
   const zh = $derived(getLocale() === "zh-Hans");
 
@@ -106,6 +112,46 @@
       searchBusy = false;
     }
   }
+
+  async function loadLifecycleMigration() {
+    if (!project.projectId) {
+      lifecycleMigration = null;
+      return;
+    }
+    lifecycleMigrationBusy = true;
+    lifecycleMigrationError = "";
+    try {
+      lifecycleMigration = await api.getProjectLifecycleMigration(project.projectId);
+      lifecycleSourceName = lifecycleMigration.commit?.sourceProjectName
+        ?? lifecycleMigration.legacySources[0]?.projectName
+        ?? "";
+    } catch (cause) {
+      lifecycleMigrationError = describeError(cause);
+    } finally {
+      lifecycleMigrationBusy = false;
+    }
+  }
+
+  async function runLifecycleMigration(action: "commit" | "rollback" | "recover") {
+    if (!project.projectId) return;
+    lifecycleMigrationBusy = true;
+    lifecycleMigrationError = "";
+    try {
+      lifecycleMigration = action === "commit"
+        ? await api.commitProjectLifecycleMigration(project.projectId, lifecycleSourceName, lifecycleStrategy)
+        : action === "rollback"
+          ? await api.rollbackProjectLifecycleMigration(project.projectId)
+          : await api.recoverProjectLifecycleMigration(project.projectId);
+    } catch (cause) {
+      lifecycleMigrationError = describeError(cause);
+    } finally {
+      lifecycleMigrationBusy = false;
+    }
+  }
+
+  $effect(() => {
+    if (project.projectId) void loadLifecycleMigration();
+  });
 </script>
 
 <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-5 sm:p-8" data-testid="project-workspace">
@@ -211,4 +257,50 @@
       </div>
     </section>
   </div>
+
+  <section class="rounded-3xl border p-5 shadow-sm" data-testid="project-lifecycle-migration" style="border-color: var(--line); background: var(--panel-strong);">
+    <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <div class="flex min-w-0 items-start gap-3">
+        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-violet-50 text-violet-600"><DatabaseZap size={18} /></span>
+        <div>
+          <h3 class="text-sm font-bold" style="color: var(--ink-strong);">{zh ? "生命周期主键与旧数据恢复" : "Lifecycle identity and recovery"}</h3>
+          <p class="mt-1 max-w-3xl text-xs leading-5" style="color: var(--muted);">{zh ? "验证、制品、发布、部署和审计统一归属于不可变 projectId。旧项目名称数据先预览冲突，再受控迁移；迁移中断可恢复，未产生后续变更时可安全回滚。" : "Validation, artifacts, releases, deployments, and audit records use the immutable projectId. Preview conflicts before migrating legacy name-based data, then recover or safely roll back."}</p>
+          {#if project.projectId}<p class="mt-2 break-all font-mono text-[10px] text-violet-500">{project.projectId}</p>{/if}
+        </div>
+      </div>
+      <button class="inline-flex h-9 items-center gap-2 rounded-xl border px-3 text-xs font-bold disabled:opacity-50" disabled={lifecycleMigrationBusy || !project.projectId} onclick={loadLifecycleMigration} style="border-color: var(--line); color: var(--ink);" type="button"><RefreshCw class={lifecycleMigrationBusy ? "animate-spin" : ""} size={13} />{zh ? "刷新状态" : "Refresh"}</button>
+    </div>
+
+    {#if lifecycleMigrationError}<div class="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">{lifecycleMigrationError}</div>{/if}
+    {#if lifecycleMigration}
+      <div class="mt-4 rounded-2xl border p-4" class:border-amber-200={lifecycleMigration.status === "conflict" || lifecycleMigration.status === "recoveryRequired"} class:bg-amber-50={lifecycleMigration.status === "conflict" || lifecycleMigration.status === "recoveryRequired"} style={lifecycleMigration.status === "conflict" || lifecycleMigration.status === "recoveryRequired" ? "" : "border-color: var(--line); background: var(--panel-soft);"}>
+        <div class="flex items-start gap-3">
+          {#if lifecycleMigration.status === "migrated" || lifecycleMigration.status === "alreadyConsolidated" || lifecycleMigration.status === "notRequired"}<ShieldCheck class="mt-0.5 shrink-0 text-emerald-600" size={18} />{:else}<AlertTriangle class="mt-0.5 shrink-0 text-amber-600" size={18} />{/if}
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-bold" style="color: var(--ink-strong);">
+              {lifecycleMigration.status === "notRequired" ? "已使用 projectId，无旧数据需要迁移" : lifecycleMigration.status === "ready" ? "发现旧项目生命周期数据" : lifecycleMigration.status === "conflict" ? "检测到 ID 数据与旧名称数据冲突" : lifecycleMigration.status === "recoveryRequired" ? "上次迁移未完成，需要恢复" : lifecycleMigration.status === "rolledBack" ? "迁移已回滚，可重新恢复" : "生命周期主键已统一"}
+            </p>
+            <p class="mt-1 text-xs leading-5" style="color: var(--muted);">旧来源 {lifecycleMigration.legacySources.length} 个 · 当前 ID 记录 {lifecycleMigration.current ? `revision ${lifecycleMigration.current.revision}` : "尚未建立"}</p>
+            {#if lifecycleMigration.legacySources.length > 0}
+              <div class="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <label class="text-[10px] font-bold" style="color: var(--muted);">旧数据来源
+                  <select class="mt-1.5 w-full rounded-xl border px-3 py-2 text-xs" bind:value={lifecycleSourceName} disabled={lifecycleMigrationBusy || lifecycleMigration.status === "migrated"} style="border-color: var(--line); background: var(--panel-strong); color: var(--ink-strong);">
+                    {#each lifecycleMigration.legacySources as source (source.projectName)}<option value={source.projectName}>{source.projectName} · 验证 {source.validationRuns} · 制品 {source.artifacts} · 发布 {source.releases} · 部署 {source.deployments}</option>{/each}
+                  </select>
+                </label>
+                <label class="text-[10px] font-bold" style="color: var(--muted);">冲突处理
+                  <select class="mt-1.5 w-full rounded-xl border px-3 py-2 text-xs" bind:value={lifecycleStrategy} disabled={lifecycleMigrationBusy || lifecycleMigration.status !== "conflict"} style="border-color: var(--line); background: var(--panel-strong); color: var(--ink-strong);"><option value="preferLegacy">以旧名称数据为准并重新签名制品</option><option value="keepCurrent">保留当前 projectId 数据</option></select>
+                </label>
+              </div>
+            {/if}
+            <div class="mt-3 flex flex-wrap gap-2">
+              {#if lifecycleMigration.canMigrate}<button class="rounded-xl bg-violet-600 px-4 py-2 text-xs font-bold text-white disabled:opacity-50" disabled={readOnly || lifecycleMigrationBusy || !lifecycleSourceName} onclick={() => runLifecycleMigration("commit")} type="button"><DatabaseZap class="mr-1.5 inline" size={13} />{lifecycleMigration.status === "rolledBack" ? "重新迁移" : "执行受控迁移"}</button>{/if}
+              {#if lifecycleMigration.canRecover}<button class="rounded-xl bg-amber-600 px-4 py-2 text-xs font-bold text-white disabled:opacity-50" disabled={readOnly || lifecycleMigrationBusy} onclick={() => runLifecycleMigration("recover")} type="button"><RefreshCw class="mr-1.5 inline" size={13} />恢复未完成迁移</button>{/if}
+              {#if lifecycleMigration.canRollback}<button class="rounded-xl border border-red-200 px-4 py-2 text-xs font-bold text-red-700 disabled:opacity-50" disabled={readOnly || lifecycleMigrationBusy} onclick={() => runLifecycleMigration("rollback")} type="button"><RotateCcw class="mr-1.5 inline" size={13} />回滚到迁移前</button>{/if}
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
+  </section>
 </div>

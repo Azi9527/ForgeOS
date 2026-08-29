@@ -35,12 +35,13 @@
     return labels[method] ?? method;
   }
 
-  async function load(projectName = project.name) {
+  async function load(projectId = project.projectId) {
     const sequence = ++loadSequence;
     loading = true;
     error = "";
     try {
-      const response = await api.getProjectAudit(projectName, 200);
+      if (!projectId) throw new Error("项目尚未完成 Project Registry V2 注册。");
+      const response = await api.getProjectAudit(projectId, 200);
       if (sequence === loadSequence) {
         entries = response.entries;
       }
@@ -57,7 +58,7 @@
   }
 
   $effect(() => {
-    void load(project.name);
+    void load(project.projectId);
   });
 </script>
 

@@ -5,10 +5,11 @@ use sha2::Digest as _;
 #[path = "project_artifact_support_tests.rs"]
 mod tests;
 
-const ARTIFACT_SIGNATURE_CONTEXT: &str = "forgeos-project-artifact-v1";
+const ARTIFACT_SIGNATURE_CONTEXT: &str = "forgeos-project-artifact-v2";
+const LEGACY_ARTIFACT_SIGNATURE_CONTEXT: &str = "forgeos-project-artifact-v1";
 
-fn project_artifact_key(project_name: &str) -> String {
-    Sha256::digest(project_name.trim().as_bytes())
+fn project_artifact_key(project_id: &str) -> String {
+    Sha256::digest(project_id.trim().as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
@@ -34,11 +35,15 @@ fn sanitize_project_artifact_name(name: &str) -> String {
     }
 }
 
-fn project_artifact_root(state: &AppState, profile_id: &str, project_name: &str) -> PathBuf {
+pub(crate) fn project_artifact_root(
+    state: &AppState,
+    profile_id: &str,
+    project_id: &str,
+) -> PathBuf {
     resolve_runtime_profile(&state.config, profile_id)
         .data_dir
         .join("project-artifacts")
-        .join(project_artifact_key(project_name))
+        .join(project_artifact_key(project_id))
 }
 
 pub(crate) async fn artifact_signing_key(state: &AppState, profile_id: &str) -> ApiResult<Vec<u8>> {
@@ -73,14 +78,32 @@ pub(crate) async fn artifact_signing_key(state: &AppState, profile_id: &str) -> 
 
 fn artifact_signature_payload(
     artifact_id: &str,
-    project_name: &str,
+    project_id: &str,
+    version: &str,
+    sha256: &str,
+    size: u64,
+) -> String {
+    artifact_signature_payload_with_context(
+        ARTIFACT_SIGNATURE_CONTEXT,
+        artifact_id,
+        project_id,
+        version,
+        sha256,
+        size,
+    )
+}
+
+fn artifact_signature_payload_with_context(
+    context: &str,
+    artifact_id: &str,
+    project_scope: &str,
     version: &str,
     sha256: &str,
     size: u64,
 ) -> String {
     format!(
-        "{ARTIFACT_SIGNATURE_CONTEXT}\n{artifact_id}\n{}\n{}\n{sha256}\n{size}",
-        project_name.trim(),
+        "{context}\n{artifact_id}\n{}\n{}\n{sha256}\n{size}",
+        project_scope.trim(),
         version.trim()
     )
 }
@@ -99,7 +122,7 @@ fn sign_artifact_manifest(key: &[u8], payload: &str) -> ApiResult<String> {
 
 pub(crate) fn artifact_manifest_signature_is_valid(
     key: &[u8],
-    project_name: &str,
+    project_id: &str,
     artifact: &Value,
 ) -> bool {
     let Some(artifact_id) = artifact.get("id").and_then(Value::as_str) else {
@@ -117,7 +140,7 @@ pub(crate) fn artifact_manifest_signature_is_valid(
     let Some(signature) = artifact.get("signature").and_then(Value::as_str) else {
         return false;
     };
-    let payload = artifact_signature_payload(artifact_id, project_name, version, sha256, size);
+    let payload = artifact_signature_payload(artifact_id, project_id, version, sha256, size);
     sign_artifact_manifest(key, &payload)
         .is_ok_and(|expected| bool::from(expected.as_bytes().ct_eq(signature.as_bytes())))
 }
@@ -125,13 +148,10 @@ pub(crate) fn artifact_manifest_signature_is_valid(
 async fn project_is_managed(
     state: &AppState,
     profile_id: &str,
-    project_name: &str,
+    project_id: &str,
 ) -> ApiResult<bool> {
     with_ui_state_read(state, profile_id, |ui_state| {
-        Ok(ui_state
-            .get("sessionFoldersByName")
-            .and_then(Value::as_object)
-            .is_some_and(|projects| projects.contains_key(project_name)))
+        Ok(project_record(ui_state, project_id).is_some())
     })
     .await
 }
@@ -159,7 +179,7 @@ async fn write_project_artifact_file(path: &Path, bytes: &[u8]) -> ApiResult<()>
 async fn read_project_artifact_metadata(
     state: &AppState,
     profile_id: &str,
-    project_name: &str,
+    project_id: &str,
     artifact_id: &str,
 ) -> ApiResult<Value> {
     if !artifact_id
@@ -169,7 +189,7 @@ async fn read_project_artifact_metadata(
         return Err(api_error(StatusCode::BAD_REQUEST, "Invalid artifact id."));
     }
     let metadata_path =
-        project_artifact_root(state, profile_id, project_name).join(format!("{artifact_id}.json"));
+        project_artifact_root(state, profile_id, project_id).join(format!("{artifact_id}.json"));
     let bytes = tokio_fs::read(metadata_path)
         .await
         .map_err(|error| match error.kind() {
@@ -185,11 +205,11 @@ async fn read_project_artifact_metadata(
 async fn verify_project_artifact(
     state: &AppState,
     profile_id: &str,
-    project_name: &str,
+    project_id: &str,
     artifact_id: &str,
 ) -> ApiResult<(Value, PathBuf)> {
     let metadata =
-        read_project_artifact_metadata(state, profile_id, project_name, artifact_id).await?;
+        read_project_artifact_metadata(state, profile_id, project_id, artifact_id).await?;
     let stored_name = metadata
         .get("storedName")
         .and_then(Value::as_str)
@@ -199,7 +219,7 @@ async fn verify_project_artifact(
                 "Artifact metadata is invalid.",
             )
         })?;
-    let file_path = project_artifact_root(state, profile_id, project_name).join(stored_name);
+    let file_path = project_artifact_root(state, profile_id, project_id).join(stored_name);
     let bytes = tokio_fs::read(&file_path)
         .await
         .map_err(|error| api_error(StatusCode::NOT_FOUND, error.to_string()))?;
@@ -213,7 +233,7 @@ async fn verify_project_artifact(
         .unwrap_or_default();
     let key = artifact_signing_key(state, profile_id).await?;
     if !bool::from(actual_digest.as_bytes().ct_eq(expected_digest.as_bytes()))
-        || !artifact_manifest_signature_is_valid(&key, project_name, &metadata)
+        || !artifact_manifest_signature_is_valid(&key, project_id, &metadata)
     {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -221,6 +241,113 @@ async fn verify_project_artifact(
         ));
     }
     Ok((metadata, file_path))
+}
+
+pub(crate) async fn migrate_legacy_project_artifacts(
+    state: &AppState,
+    profile_id: &str,
+    project_id: &str,
+    project_name: &str,
+    legacy_project_name: &str,
+    lifecycle: &mut Value,
+) -> ApiResult<()> {
+    let artifacts = lifecycle
+        .get_mut("release")
+        .and_then(|release| release.get_mut("artifacts"))
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, "Legacy release state is invalid."))?;
+    let legacy_root = project_artifact_root(state, profile_id, legacy_project_name);
+    let target_root = project_artifact_root(state, profile_id, project_id);
+    let key = artifact_signing_key(state, profile_id).await?;
+
+    for artifact in artifacts {
+        let Some(artifact_id) = artifact
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let metadata_path = legacy_root.join(format!("{artifact_id}.json"));
+        let Ok(metadata_bytes) = tokio_fs::read(&metadata_path).await else {
+            continue;
+        };
+        let mut metadata: Value = serde_json::from_slice(&metadata_bytes)
+            .map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
+        let stored_name = metadata
+            .get("storedName")
+            .and_then(Value::as_str)
+            .ok_or_else(|| api_error(StatusCode::CONFLICT, "Legacy artifact metadata is invalid."))?
+            .to_string();
+        let bytes = tokio_fs::read(legacy_root.join(&stored_name))
+            .await
+            .map_err(|error| api_error(StatusCode::CONFLICT, error.to_string()))?;
+        let actual_digest = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let expected_digest = metadata
+            .get("sha256")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if !bool::from(actual_digest.as_bytes().ct_eq(expected_digest.as_bytes())) {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "Legacy artifact digest verification failed.",
+            ));
+        }
+        let version = metadata
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let size = metadata
+            .get("size")
+            .and_then(Value::as_u64)
+            .unwrap_or(bytes.len() as u64);
+        let legacy_signature = metadata
+            .get("signature")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let legacy_payload = artifact_signature_payload_with_context(
+            LEGACY_ARTIFACT_SIGNATURE_CONTEXT,
+            &artifact_id,
+            legacy_project_name,
+            &version,
+            &expected_digest,
+            size,
+        );
+        if !sign_artifact_manifest(&key, &legacy_payload).is_ok_and(|expected| {
+            bool::from(expected.as_bytes().ct_eq(legacy_signature.as_bytes()))
+        }) {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "Legacy artifact signature verification failed.",
+            ));
+        }
+        let signature = sign_artifact_manifest(
+            &key,
+            &artifact_signature_payload(&artifact_id, project_id, &version, &expected_digest, size),
+        )?;
+        metadata["projectId"] = json!(project_id);
+        metadata["projectName"] = json!(project_name);
+        metadata["legacyProjectName"] = json!(legacy_project_name);
+        metadata["signature"] = json!(signature);
+        metadata["signatureAlgorithm"] = json!("hmac-sha256");
+        metadata["signatureVerified"] = json!(true);
+        write_project_artifact_file(&target_root.join(&stored_name), &bytes).await?;
+        write_project_artifact_file(
+            &target_root.join(format!("{artifact_id}.json")),
+            &serde_json::to_vec_pretty(&metadata)
+                .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+        )
+        .await?;
+        artifact["signature"] = metadata["signature"].clone();
+        artifact["signatureAlgorithm"] = json!("hmac-sha256");
+        artifact["signatureVerified"] = json!(true);
+    }
+    Ok(())
 }
 
 pub(crate) async fn handle_project_artifacts_api_http(
@@ -249,7 +376,7 @@ pub(crate) async fn handle_project_artifacts_api_http(
             Ok(multipart) => multipart,
             Err(_) => return json_error(StatusCode::BAD_REQUEST, "Invalid artifact upload."),
         };
-        let mut project_name = String::new();
+        let mut project_id = String::new();
         let mut version = String::new();
         let mut source_commit = String::new();
         let mut original_name = String::new();
@@ -266,17 +393,17 @@ pub(crate) async fn handle_project_artifacts_api_http(
                 }
             } else if let Ok(value) = field.text().await {
                 match field_name.as_str() {
-                    "projectName" => project_name = value.trim().to_string(),
+                    "projectId" => project_id = value.trim().to_string(),
                     "version" => version = value.trim().to_string(),
                     "sourceCommit" => source_commit = value.trim().to_string(),
                     _ => {}
                 }
             }
         }
-        if project_name.is_empty() || version.is_empty() || file_bytes.is_empty() {
+        if project_id.is_empty() || version.is_empty() || file_bytes.is_empty() {
             return json_error(
                 StatusCode::BAD_REQUEST,
-                "projectName, version, and file are required.",
+                "projectId, version, and file are required.",
             );
         }
         if file_bytes.len() as u64 > state.config.max_upload_bytes {
@@ -285,7 +412,7 @@ pub(crate) async fn handle_project_artifacts_api_http(
                 "Project artifact is too large.",
             );
         }
-        match project_is_managed(&state, &auth.profile_id, &project_name).await {
+        match project_is_managed(&state, &auth.profile_id, &project_id).await {
             Ok(true) => {}
             Ok(false) => return json_error(StatusCode::NOT_FOUND, "Project was not found."),
             Err(error) => return json_error(error.status, &error.message),
@@ -293,7 +420,20 @@ pub(crate) async fn handle_project_artifacts_api_http(
         let artifact_id = Uuid::new_v4().to_string();
         let safe_name = sanitize_project_artifact_name(&original_name);
         let stored_name = format!("{artifact_id}-{safe_name}");
-        let root = project_artifact_root(&state, &auth.profile_id, &project_name);
+        let project_name = match with_ui_state_read(&state, &auth.profile_id, |ui_state| {
+            let project = lifecycle_project_record(ui_state, &project_id)?;
+            Ok(project
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string())
+        })
+        .await
+        {
+            Ok(project_name) => project_name,
+            Err(error) => return json_error(error.status, &error.message),
+        };
+        let root = project_artifact_root(&state, &auth.profile_id, &project_id);
         let file_path = root.join(&stored_name);
         let sha256 = Sha256::digest(&file_bytes)
             .iter()
@@ -305,7 +445,7 @@ pub(crate) async fn handle_project_artifacts_api_http(
         };
         let signature_payload = artifact_signature_payload(
             &artifact_id,
-            &project_name,
+            &project_id,
             &version,
             &sha256,
             file_bytes.len() as u64,
@@ -316,6 +456,7 @@ pub(crate) async fn handle_project_artifacts_api_http(
         };
         let metadata = json!({
             "id": artifact_id,
+            "projectId": project_id,
             "projectName": project_name,
             "name": original_name,
             "version": version,
@@ -354,7 +495,7 @@ pub(crate) async fn handle_project_artifacts_api_http(
                 at: now_unix_ms(),
                 role: user_role_label(auth.role).to_string(),
                 method: "projectArtifacts/upload".to_string(),
-                target: Some(project_name),
+                target: Some(project_id),
                 ok: true,
                 error: None,
             },
@@ -365,18 +506,17 @@ pub(crate) async fn handle_project_artifacts_api_http(
         return response;
     }
 
-    let project_name = query_param_value(request.uri().query(), "projectName").unwrap_or_default();
+    let project_id = query_param_value(request.uri().query(), "projectId").unwrap_or_default();
     let artifact_id = query_param_value(request.uri().query(), "artifactId").unwrap_or_default();
-    if project_name.is_empty() || artifact_id.is_empty() {
+    if project_id.is_empty() || artifact_id.is_empty() {
         return json_error(
             StatusCode::BAD_REQUEST,
-            "projectName and artifactId are required.",
+            "projectId and artifactId are required.",
         );
     }
     match (request.method(), route_path) {
         (&Method::GET, "/api/project-artifacts/verify") => {
-            match verify_project_artifact(&state, &auth.profile_id, &project_name, &artifact_id)
-                .await
+            match verify_project_artifact(&state, &auth.profile_id, &project_id, &artifact_id).await
             {
                 Ok((metadata, _)) => Json(json!({
                     "ok": true,
@@ -387,8 +527,7 @@ pub(crate) async fn handle_project_artifacts_api_http(
             }
         }
         (&Method::GET, "/api/project-artifacts/download") => {
-            match verify_project_artifact(&state, &auth.profile_id, &project_name, &artifact_id)
-                .await
+            match verify_project_artifact(&state, &auth.profile_id, &project_id, &artifact_id).await
             {
                 Ok((metadata, file_path)) => match tokio_fs::read(file_path).await {
                     Ok(bytes) => {
