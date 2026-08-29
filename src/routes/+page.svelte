@@ -6456,11 +6456,6 @@
         syncSelectedSessionInUrl(null);
       }
 
-      if (draftSessionRequested) {
-        activateDraftSession(projectSessionPreferences(projectByName(activeSessionFolder), config.defaults));
-        return;
-      }
-
       const requestedProject = activeProjectId
         ? portalProjects.find((project) => project.projectId === activeProjectId) ?? null
         : projectByName(activeSessionFolder);
@@ -6469,6 +6464,12 @@
         activeSessionFolder = requestedProject.name;
         syncSessionListStateInUrl();
       }
+
+      if (draftSessionRequested) {
+        activateDraftSession(projectSessionPreferences(requestedProject, config.defaults));
+        return;
+      }
+
       if (requestedProject?.lastSessionId && (await selectSession(requestedProject.lastSessionId))) {
         return;
       }

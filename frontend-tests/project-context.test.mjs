@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { resolveProjectContext } from "../src/lib/project-context.ts";
@@ -133,4 +134,21 @@ test("projectId URL context survives a rename and wins over a stale display name
   assert.equal(context?.identity, "prj_aps");
   assert.equal(context?.project.name, "APS Renamed");
   assert.deepEqual(context?.sessions.map((entry) => entry.id), ["selected"]);
+});
+
+test("a project-scoped draft resolves its stable project id before applying workspace preferences", async () => {
+  const source = await readFile(new URL("../src/routes/+page.svelte", import.meta.url), "utf8");
+  const bootstrapStart = source.indexOf("async function bootstrap()");
+  const bootstrapEnd = source.indexOf("async function refreshSessions", bootstrapStart);
+  const bootstrap = source.slice(bootstrapStart, bootstrapEnd);
+  const projectResolution = bootstrap.indexOf("const requestedProject = activeProjectId");
+  const draftActivation = bootstrap.indexOf("if (draftSessionRequested)");
+
+  assert.notEqual(projectResolution, -1);
+  assert.notEqual(draftActivation, -1);
+  assert.ok(projectResolution < draftActivation);
+  assert.match(
+    bootstrap,
+    /activateDraftSession\(projectSessionPreferences\(requestedProject, config\.defaults\)\)/u
+  );
 });
