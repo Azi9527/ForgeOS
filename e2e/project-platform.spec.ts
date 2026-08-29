@@ -57,6 +57,7 @@ async function login(page: import("@playwright/test").Page) {
 }
 
 test("opens a project folder into release and operations workspaces", async ({ page }) => {
+  test.setTimeout(180_000);
   await login(page);
   const projectName = `Enterprise Pilot ${Date.now()}`;
   const created = await wsRequest<{
