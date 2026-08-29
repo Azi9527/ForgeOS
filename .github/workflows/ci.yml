@@ -41,6 +41,9 @@ jobs:
         working-directory: backend
         run: cargo fmt --check
 
+      - name: Test frontend state and project context
+        run: pnpm test:frontend
+
       - name: Test viewer route authorization
         working-directory: backend
         run: cargo test main_tests::auth_git_static::viewer_http_routes_match_websocket_authorization_policy
