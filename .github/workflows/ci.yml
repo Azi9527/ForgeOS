@@ -122,5 +122,8 @@ jobs:
       - name: Build fake Codex app-server
         run: pnpm build:e2e-fake
 
-      - name: Run workspace E2E
-        run: pnpm exec playwright test e2e/computer-input.spec.ts e2e/continuous-session.spec.ts e2e/project-platform.spec.ts --reporter=line --workers=1
+      - name: Run session workspace E2E
+        run: pnpm exec playwright test e2e/computer-input.spec.ts e2e/continuous-session.spec.ts --reporter=line --workers=1
+
+      - name: Run Project Registry E2E
+        run: pnpm exec playwright test e2e/project-platform.spec.ts --reporter=line --workers=1
