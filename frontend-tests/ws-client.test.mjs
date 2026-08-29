@@ -62,7 +62,11 @@ class MockWebSocket extends EventTarget {
   }
 }
 
-globalThis.window = { location: new URL("http://localhost/") };
+globalThis.window = {
+  location: new URL("http://localhost/"),
+  addEventListener() {},
+  removeEventListener() {}
+};
 globalThis.WebSocket = MockWebSocket;
 
 const { WebSocketRpcClient } = await import(

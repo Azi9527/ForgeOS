@@ -239,6 +239,24 @@ function preferRicherArray<T>(existing: unknown, incoming: unknown): T[] | undef
   return incomingEntries.length >= existingEntries.length ? incomingEntries : existingEntries;
 }
 
+function preferRicherCommand(existing: unknown, incoming: unknown): string | unknown[] | undefined {
+  const existingCommand = typeof existing === "string" || Array.isArray(existing) ? existing : undefined;
+  const incomingCommand = typeof incoming === "string" || Array.isArray(incoming) ? incoming : undefined;
+  if (incomingCommand === undefined) {
+    return existingCommand;
+  }
+  if (existingCommand === undefined) {
+    return incomingCommand;
+  }
+  if (typeof existingCommand === "string" && typeof incomingCommand === "string") {
+    return preferProgressiveString(existingCommand, incomingCommand) as string;
+  }
+  if (Array.isArray(existingCommand) && Array.isArray(incomingCommand)) {
+    return preferRicherArray(existingCommand, incomingCommand);
+  }
+  return Array.isArray(incomingCommand) && incomingCommand.length > 0 ? incomingCommand : existingCommand;
+}
+
 function mergeStructuredMetadata(existing: unknown, incoming: unknown): unknown {
   if (incoming === undefined || incoming === null) {
     return existing;
@@ -315,7 +333,7 @@ function mergeItem(existingItem: CodexItem | undefined, incomingItem: CodexItem)
     merged.changes = preferRicherArray(existingItem.changes, incomingItem.changes);
   }
   if ("command" in existingItem || "command" in incomingItem) {
-    merged.command = preferRicherArray(existingItem.command, incomingItem.command);
+    merged.command = preferRicherCommand(existingItem.command, incomingItem.command);
   }
   if ("diff" in existingItem || "diff" in incomingItem) {
     merged.diff = preferProgressiveString(existingItem.diff, incomingItem.diff);
