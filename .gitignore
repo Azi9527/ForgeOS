@@ -2,6 +2,9 @@
 .data
 .playwright-mcp
 .local-tools/
+.npm-pack-cache/
+.forgeos-e2e-*/
+.forgeos/project.json
 .run
 build
 node_modules

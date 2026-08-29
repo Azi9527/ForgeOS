@@ -5,7 +5,7 @@
 The intended user-facing entrypoint is:
 
 ```bash
-npx codex-webui
+npx --package forgeos-platform forgeos
 ```
 
 That implies the published package must be able to:
@@ -21,18 +21,27 @@ The npm package should include:
 
 - `bin/codex-webui.mjs`
 - the built static frontend under `build/static`
-- docs and helper scripts that the CLI depends on
+- docs plus `scripts/gateway-release.mjs` and `scripts/gateway-data-backup.mjs`
 - Rust gateway binaries under `dist/backend/<target>/`
+
+The operator package deliberately omits the Rust source tree, Svelte source,
+tests, and local build outputs. GitHub remains the source distribution; the npm
+tarball is a runnable operator artifact.
 
 The package already exposes:
 
 ```json
 {
   "bin": {
+    "forgeos": "./bin/codex-webui.mjs",
     "codex-webui": "./bin/codex-webui.mjs"
   }
 }
 ```
+
+`forgeos` is the supported operator command. `codex-webui` is retained only as
+a compatibility alias for existing local automation; new documentation and
+scripts must use `forgeos`.
 
 ## CLI Contract
 
@@ -98,23 +107,34 @@ gateway bundle containing the native binary, static frontend, target metadata,
 and the binary SHA-256 digest. After downloading and extracting the artifact:
 
 ```bash
-codex-webui gateway install /path/to/forgeos-gateway-<version>-<target>
-codex-webui gateway status
-codex-webui gateway restart
-codex-webui gateway rollback
+forgeos gateway install /path/to/forgeos-gateway-<version>-<target>
+forgeos gateway status
+forgeos gateway restart
+forgeos gateway rollback
 ```
 
 Installation verifies the platform target, confines manifest paths to the
 bundle directory, verifies the binary digest, copies the release into the
 user-local runtime directory, and atomically switches the active release
-pointer. The prior release remains available for rollback. If the replacement
-gateway cannot restart, the launcher restores the prior release pointer and
-starts the previous gateway.
+pointer. The launcher then waits for both `/readyz` and instance-token health
+verification. If the replacement exits, times out, or never becomes ready, the
+launcher terminates it, restores the prior release pointer, and starts the
+previous gateway.
 
 The managed release directory is under `~/.codex/codex-webui/gateway-releases/`.
-`gateway-release-state.json` records only the active and previous release.
+`gateway-release-state.json` records only the active and previous release. Each
+state switch keeps the last valid state in `gateway-release-state.json.bak`.
+Startup restores a damaged active state from that backup; if neither copy is
+valid, gateway management fails explicitly instead of silently forgetting the
+installed releases.
 Explicit `backendBinaryPath` and `CODEX_WEBUI_BACKEND_BIN` overrides continue to
 take precedence for operators who intentionally manage their own binary.
+
+Gateway business-data backup is intentionally independent of this binary
+release state. Use `pnpm gateway:data backup|verify|restore` for profile-owned
+state, project artifacts, the profile signing key, and audit logs. The scope,
+credential exclusions, manifest checks, and restore runbook are documented in
+[gateway-data-backup.md](./gateway-data-backup.md).
 
 ## Launch Model
 
@@ -194,17 +214,17 @@ The Settings page also exposes a per-user automatic startup toggle:
 - Windows uses the current user's Startup folder
 - macOS uses `~/Library/LaunchAgents/`
 - Linux prefers `systemd --user` and falls back to XDG autostart desktop entries when user-systemd is unavailable
-- the generated startup entry launches the packaged `codex-webui` CLI, so normal config resolution and background PID handling stay unchanged
+- the generated startup entry launches the packaged `forgeos` CLI, so normal config resolution and background PID handling stay unchanged
 
 ## Tunnel Behavior
 
 The tunnel command family is:
 
 ```bash
-codex-webui tunnel start [--provider auto|cloudflared|ngrok] [--foreground] [--hostname host] [--name tunnel] [--overwrite-dns] [--log-level level] [--arg value] [--yes]
-codex-webui tunnel status [--json]
-codex-webui tunnel stop
-codex-webui tunnel logs [--lines 80] [--json]
+forgeos tunnel start [--provider auto|cloudflared|ngrok] [--foreground] [--hostname host] [--name tunnel] [--overwrite-dns] [--log-level level] [--arg value] [--yes]
+forgeos tunnel status [--json]
+forgeos tunnel stop
+forgeos tunnel logs [--lines 80] [--json]
 ```
 
 Behavior:
@@ -264,9 +284,16 @@ dist/backend/<target>/
 
 The `Gateway release bundles` GitHub workflow builds the native gateway on a
 real `windows-latest` MSVC runner. In addition to the portable bundle directory,
-the Windows job publishes a ZIP archive, a sibling `.sha256` checksum, and a
-GitHub build provenance attestation. PyPI is not involved in this distribution
-path.
+the Windows job publishes a ZIP archive, a runnable ForgeOS operator `.tgz`,
+sibling `.sha256` checksums, and GitHub build provenance attestations. The job
+fails if the npm package omits a runtime file, contains application source, or a
+release tag version differs from `package.json`. Pushes and manual runs retain
+these as temporary workflow artifacts. Only `v*` and `forgeos-v*` tag runs
+create or update a permanent GitHub Release with the Windows assets. PyPI is not
+involved in this distribution path.
+
+The workflow cancels an older in-progress bundle run when a newer run targets
+the same branch or tag. Different release tags never cancel one another.
 
 The local installer verifies the binary digest from `forgeos-gateway.json`
 before activating a release and retains one previous release for atomic
@@ -288,18 +315,21 @@ Before publishing, check:
 9. `cargo check --manifest-path backend/Cargo.toml`
 10. `pnpm exec playwright test e2e/base-path.spec.ts`
 11. `package.json` includes `bin`, `build`, `dist`, and docs
-12. `node ./bin/codex-webui.mjs` works from a clean checkout
-13. `npx .` or a packed tarball works on a machine that does not rely on local build artifacts by accident
+12. `pnpm cli` works from a clean checkout
+13. `npx --package . forgeos` or a packed tarball works on a machine that does not rely on local build artifacts by accident
+14. create the release tag as either `v<version>` or `forgeos-v<version>` and keep it equal to `package.json#version`; branch pushes never create a GitHub Release
 
 ## Recommended Smoke Tests
 
 Before publishing a package, verify at least:
 
 - first-run interactive setup creates `~/.codex/codex-webui.yml`
-- `codex-webui` starts the background server and prints a usable URL
-- `codex-webui status` verifies the current instance rather than trusting a raw PID file
+- `forgeos` starts the background server and prints a usable URL
+- `forgeos status` verifies the current instance rather than trusting a raw PID file
 - login works through the printed base path
 - WebSocket connection succeeds after login
-- `codex-webui restart` and `codex-webui stop` work
-- `codex-webui tunnel` selects the expected tunneling tool
+- `forgeos restart` and `forgeos stop` work
+- a deliberately broken replacement gateway fails readiness and automatically restores the previous release
+- corrupting only `gateway-release-state.json` restores its valid `.bak`, while corrupting both copies fails explicitly
+- `forgeos tunnel` selects the expected tunneling tool
 - the packaged binary resolution path works without a local Rust build tree
