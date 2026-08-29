@@ -13,6 +13,7 @@
     confirmLabel,
     nameLabel = null,
     nameValue = "",
+    targetPathPreview = null,
     onBrowse,
     onConfirm,
     onNameChange = () => {},
@@ -27,6 +28,7 @@
     confirmLabel: string;
     nameLabel?: string | null;
     nameValue?: string;
+    targetPathPreview?: string | null;
     onBrowse: (path: string) => void | Promise<void>;
     onConfirm: (path: string) => void | Promise<void>;
     onNameChange?: (value: string) => void;
@@ -73,6 +75,12 @@
                 value={nameValue}
               />
             </label>
+          {/if}
+          {#if targetPathPreview}
+            <div class="rounded-xl border border-violet-100 bg-violet-50 px-4 py-3">
+              <p class="text-[10px] font-bold uppercase tracking-widest text-violet-500">项目目录</p>
+              <p class="mt-1 break-all font-mono text-xs font-semibold text-violet-800">{targetPathPreview}</p>
+            </div>
           {/if}
           <div class="mb-6 flex items-center gap-2">
             <button

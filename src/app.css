@@ -783,6 +783,25 @@
   background: rgba(255, 255, 255, 0.88);
 }
 
+.project-shell-command {
+  display: flex;
+  min-width: 0;
+  align-items: stretch;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.07);
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.project-shell-command .forge-workspace-header--project {
+  position: static;
+  flex: 0 1 31rem;
+  border-bottom: 0;
+  border-left: 1px solid rgba(15, 23, 42, 0.06);
+}
+
+.project-shell-command .forge-workspace-header--project > :first-child {
+  max-width: 12rem;
+}
+
 .forge-flow-map {
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--line));

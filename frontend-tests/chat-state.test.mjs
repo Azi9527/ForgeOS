@@ -356,3 +356,33 @@ test("a fully hydrated turn clears its deferred item count", () => {
   assert.equal(merged.hiddenItemCount, 0);
   assert.equal(merged.items.length, 2);
 });
+
+test("a sparse command update preserves a string command", () => {
+  const current = createConversationState(
+    detailWithItems([
+      {
+        id: "command-1",
+        type: "commandExecution",
+        command: "npm run build",
+        status: "running"
+      }
+    ])
+  );
+
+  const completed = applyStreamEvent(current, {
+    kind: "notification",
+    method: "item/completed",
+    params: {
+      turnId: "turn-1",
+      item: {
+        id: "command-1",
+        type: "commandExecution",
+        aggregatedOutput: "built",
+        status: "completed"
+      }
+    }
+  });
+
+  assert.equal(completed.thread.turns[0].items[0].command, "npm run build");
+  assert.equal(completed.thread.turns[0].items[0].aggregatedOutput, "built");
+});

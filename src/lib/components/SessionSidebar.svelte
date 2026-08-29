@@ -78,6 +78,7 @@
     knownSessionTags,
     sessionFolders,
     activeSessionFolder,
+    currentProject = null,
     activeSavedSessionFilterId,
     showArchived,
     onSelect,
@@ -149,6 +150,7 @@
     onCancelAccountLogin,
     onLogoutAccount,
     onLogoutWeb,
+    onOpenPortal,
     showCloseButton = false,
     onClose = () => {}
   }: {
@@ -169,6 +171,7 @@
     knownSessionTags: string[];
     sessionFolders: SessionFolder[];
     activeSessionFolder: string | null;
+    currentProject?: SessionFolder | null;
     activeSavedSessionFilterId: string | null;
     showArchived: boolean;
     onSelect: (sessionId: string, profileId?: string | null) => void;
@@ -255,6 +258,7 @@
     onCancelAccountLogin: (loginId: string) => void;
     onLogoutAccount: () => void;
     onLogoutWeb: () => void;
+    onOpenPortal: () => void;
     showCloseButton?: boolean;
     onClose?: () => void;
   } = $props();
@@ -407,6 +411,10 @@
   });
 
   const selectedSession = $derived(sessions.find((session) => session.id === selectedId) ?? null);
+  const activeProject = $derived(
+    currentProject ??
+      (activeSessionFolder ? sessionFolders.find((folder) => folder.name === activeSessionFolder) ?? null : null)
+  );
   const runningSessionCount = $derived(sessions.filter((session) => isSessionRunning(session)).length);
   const displayedQuotaLimits = $derived(quotaLimitsForDisplay(quota));
   const projectSessionGroups = $derived.by(() => {
@@ -465,7 +473,7 @@
   function displaySessionTitle(session: SessionSummary) {
     const normalizedName = (session.name ?? "").trim();
     if (normalizedName && normalizedName !== "New thread" && normalizedName !== m.new_thread()) {
-      return normalizedName;
+      return compactSessionTitle(normalizedName);
     }
 
     const preview = session.preview.replace(/\s+/g, " ").trim();
@@ -490,7 +498,18 @@
       return preview.length > 60 ? `${preview.slice(0, 60).trimEnd()}...` : preview;
     }
 
-    return candidate.length > 60 ? `${candidate.slice(0, 60).trimEnd()}...` : candidate;
+    return compactSessionTitle(candidate);
+  }
+
+  function compactSessionTitle(value: string) {
+    const compact = value
+      .replace(/^(?:#[A-Za-z0-9_-]+\s*)+/gu, "")
+      .split(/(?:={4,}|仓库信息[：:]?|一、任务目标|##\s)/u, 1)[0]
+      ?.split(/(?<=[。！？.!?])\s*/u, 1)[0]
+      ?.replace(/\s+/gu, " ")
+      .trim();
+    const candidate = compact || value.replace(/\s+/gu, " ").trim();
+    return candidate.length > 42 ? `${candidate.slice(0, 42).trimEnd()}…` : candidate;
   }
 
   function sessionAccountBadgeLabel(session: SessionSummary) {
@@ -1078,13 +1097,13 @@
 <aside class="sidebar forge-sidebar flex h-full w-full min-w-0 flex-col transition-all">
   <div class="p-4 flex flex-col gap-4">
     <div class="relative flex items-center justify-between">
-      <div class="flex items-center gap-2 px-1">
+      <button class="flex min-w-0 items-center gap-2 rounded-xl px-1 py-1 text-left transition hover:bg-white/5" onclick={onOpenPortal} title="返回企业工作台" type="button">
         <div class="forge-mark">F</div>
         <div class="min-w-0">
           <h1 class="text-base font-semibold tracking-tight text-white">{ui.appShortName}</h1>
-          <p class="text-[8px] font-bold uppercase tracking-[0.22em] text-white/35">工程控制中心</p>
+          <p class="truncate text-[8px] font-bold uppercase tracking-[0.18em] text-white/35">企业 AI 原生应用平台</p>
         </div>
-      </div>
+      </button>
       <div class="flex items-center gap-1.5">
         <button
           bind:this={notificationButtonElement}
@@ -1176,7 +1195,7 @@
       {/if}
     </div>
 
-      <button 
+    <button
       class={`forge-create-task flex w-full items-center gap-2 rounded-xl border px-4 py-3 shadow-sm transition-all group ${
         readOnly
           ? "cursor-not-allowed border-gray-200 bg-gray-100/90 text-gray-400 opacity-70"
@@ -1209,7 +1228,33 @@
 	      </button>
 	    </div>
 
-	    <div class="sidebar-folders rounded-2xl border border-gray-200 bg-white/70 p-2 shadow-sm">
+      {#if activeProject}
+        <div class="sidebar-project-context rounded-2xl border border-violet-400/20 bg-violet-500/10 p-3">
+          <div class="flex items-start gap-2.5">
+            <span class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-violet-500/15 text-violet-300">
+              <FolderOpen size={16} />
+            </span>
+            <div class="min-w-0 flex-1">
+              <p class="text-[9px] font-bold uppercase tracking-[0.16em] text-violet-300/70">当前项目</p>
+              <p class="mt-0.5 truncate text-sm font-bold text-white">{activeProject.name}</p>
+              <p class="mt-0.5 truncate text-[10px] text-white/35" title={activeProject.rootPath ?? activeProject.name}>
+                {activeProject.rootPath ?? "尚未绑定目录"}
+              </p>
+            </div>
+            <button
+              class="rounded-lg p-1.5 text-white/35 transition hover:bg-white/10 hover:text-white"
+              disabled={readOnly}
+              onclick={() => onSaveSessionFolderDefaults(activeProject)}
+              title="项目设置"
+              type="button"
+            >
+              <Settings size={14} />
+            </button>
+          </div>
+        </div>
+      {/if}
+
+	    <div class:hidden={Boolean(activeProject)} class="sidebar-folders rounded-2xl border border-gray-200 bg-white/70 p-2 shadow-sm">
 	      <div class="flex items-center justify-between gap-2">
 	        <button
 	          aria-expanded={!sessionFoldersCollapsed}
@@ -1663,6 +1708,7 @@
 
       {#each projectSessionGroups as projectGroup (projectGroup.key)}
         <section class="sidebar-project-group" data-project-key={projectGroup.key}>
+          {#if !activeProject}
           <button
             aria-expanded={!isProjectGroupCollapsed(projectGroup)}
             class="sidebar-project-heading flex w-full min-w-0 items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors"
@@ -1684,9 +1730,10 @@
               class={`shrink-0 transition-transform ${isProjectGroupCollapsed(projectGroup) ? "-rotate-90" : ""}`}
             />
           </button>
+          {/if}
 
-          {#if !isProjectGroupCollapsed(projectGroup)}
-            <div class="mt-1 space-y-1 border-l border-white/10 pl-2">
+          {#if activeProject || !isProjectGroupCollapsed(projectGroup)}
+            <div class:mt-1={!activeProject} class:border-l={!activeProject} class:pl-2={!activeProject} class="space-y-1 border-white/10">
               {#each projectGroup.sessions as session (`${session.profileId ?? ""}:${session.id}`)}
                 <div class="group relative" data-session-id={session.id}>
           <button

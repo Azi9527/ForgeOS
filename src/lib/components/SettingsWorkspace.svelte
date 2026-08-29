@@ -248,7 +248,9 @@
   });
   const ui = $derived.by(() => {
     const _locale = $localeSignal;
-    const isKorean = getLocale() === "ko";
+    const currentLocale = getLocale();
+    const isChinese = currentLocale.startsWith("zh");
+    const isKorean = currentLocale === "ko";
 
     return {
       settings: m.settings(),
@@ -270,33 +272,37 @@
       webuiCommit: m.webui_commit(),
       webuiBuiltAt: m.webui_built_at(),
       webuiDirtyBuild: m.webui_dirty_build(),
-      runtimeProcesses: isKorean ? "Codex 프로세스" : "Codex processes",
-      runtimeProcessesDescription: isKorean
+      runtimeProcesses: isChinese ? "运行节点" : isKorean ? "Codex 프로세스" : "Codex processes",
+      runtimeProcessesDescription: isChinese
+        ? "当前由 ForgeOS 管理的执行进程及其关联开发对话。"
+        : isKorean
         ? "현재 WebUI가 관리 중인 Codex app-server 프로세스와 연결된 세션입니다."
         : "Codex app-server processes currently managed by this WebUI and their attached sessions.",
-      runningProcesses: isKorean ? "실행 중" : "Running",
-      noRuntimeProcesses: isKorean ? "현재 관리 중인 Codex 프로세스가 없습니다." : "No managed Codex processes are running.",
-      forceKill: isKorean ? "강제 종료" : "Force kill",
-      forceKillConfirm: isKorean
+      runningProcesses: isChinese ? "运行中" : isKorean ? "실행 중" : "Running",
+      noRuntimeProcesses: isChinese ? "当前没有由 ForgeOS 管理的运行进程。" : isKorean ? "현재 관리 중인 Codex 프로세스가 없습니다." : "No managed Codex processes are running.",
+      forceKill: isChinese ? "强制终止" : isKorean ? "강제 종료" : "Force kill",
+      forceKillConfirm: isChinese
+        ? "确定强制终止此运行进程吗？关联的执行中对话将被标记为失败。"
+        : isKorean
         ? "이 Codex 프로세스를 강제 종료할까요? 연결된 실행 중 세션은 실패 상태로 정리됩니다."
         : "Force kill this Codex process? Attached running sessions will be marked as failed.",
       processKindStdio: isKorean ? "stdio" : "stdio",
-      processKindHandoffProxy: isKorean ? "핸드오프 프록시" : "handoff proxy",
-      processKindHandoffDaemon: isKorean ? "핸드오프 서버" : "handoff server",
+      processKindHandoffProxy: isChinese ? "接续代理" : isKorean ? "핸드오프 프록시" : "handoff proxy",
+      processKindHandoffDaemon: isChinese ? "接续服务" : isKorean ? "핸드오프 서버" : "handoff server",
       pid: "PID",
-      profile: isKorean ? "프로필" : "Profile",
-      sessions: isKorean ? "세션" : "Sessions",
-      pendingRequests: isKorean ? "대기 요청" : "Pending requests",
-      noAttachedSessions: isKorean ? "연결된 실행 중 세션이 없습니다." : "No attached running sessions.",
-      openSession: isKorean ? "세션 열기" : "Open session",
+      profile: isChinese ? "执行配置" : isKorean ? "프로필" : "Profile",
+      sessions: isChinese ? "开发对话" : isKorean ? "세션" : "Sessions",
+      pendingRequests: isChinese ? "等待请求" : isKorean ? "대기 요청" : "Pending requests",
+      noAttachedSessions: isChinese ? "没有关联的执行中对话。" : isKorean ? "연결된 실행 중 세션이 없습니다." : "No attached running sessions.",
+      openSession: isChinese ? "打开对话" : isKorean ? "세션 열기" : "Open session",
       notifications: m.notifications(),
       startup: m.startup(),
       sessionDefaults: m.session_defaults(),
       defaultLanguageBridge: m.default_language_bridge(),
       defaultLanguageBridgeDescription: m.default_language_bridge_description(),
-      languageBridgeOutput: isKorean ? "출력 언어" : "Output language",
-      languageBridgeAuto: isKorean ? "자동 감지" : "Auto detect",
-      saveDefaults: isKorean ? "기본값 저장" : "Save defaults",
+      languageBridgeOutput: isChinese ? "输出语言" : isKorean ? "출력 언어" : "Output language",
+      languageBridgeAuto: isChinese ? "自动识别" : isKorean ? "자동 감지" : "Auto detect",
+      saveDefaults: isChinese ? "保存默认设置" : isKorean ? "기본값 저장" : "Save defaults",
       autostartTitle: m.autostart_title(),
       autostartDescription: m.autostart_description(),
       autostartEnable: m.autostart_enable(),
@@ -352,14 +358,14 @@
       savePreset: m.save_preset(),
       noPromptPresets: m.no_prompt_presets(),
       installedPlugins: m.installed_plugins(),
-      marketplaceManagement: isKorean ? "마켓플레이스" : "Marketplaces",
-      marketplacePath: isKorean ? "마켓플레이스 경로" : "Marketplace path",
-      marketplaceName: isKorean ? "원격 마켓플레이스 이름" : "Remote marketplace name",
-      addMarketplace: isKorean ? "추가" : "Add",
-      removeMarketplace: isKorean ? "제거" : "Remove",
-      upgradeMarketplace: isKorean ? "업데이트" : "Upgrade",
-      pluginDetails: isKorean ? "상세" : "Details",
-      uninstall: isKorean ? "제거" : "Uninstall",
+      marketplaceManagement: isChinese ? "扩展市场" : isKorean ? "마켓플레이스" : "Marketplaces",
+      marketplacePath: isChinese ? "扩展市场路径" : isKorean ? "마켓플레이스 경로" : "Marketplace path",
+      marketplaceName: isChinese ? "远程扩展市场名称" : isKorean ? "원격 마켓플레이스 이름" : "Remote marketplace name",
+      addMarketplace: isChinese ? "添加" : isKorean ? "추가" : "Add",
+      removeMarketplace: isChinese ? "移除" : isKorean ? "제거" : "Remove",
+      upgradeMarketplace: isChinese ? "更新" : isKorean ? "업데이트" : "Upgrade",
+      pluginDetails: isChinese ? "详情" : isKorean ? "상세" : "Details",
+      uninstall: isChinese ? "卸载" : isKorean ? "제거" : "Uninstall",
       apps: m.apps(),
       appEnabled: m.app_enabled(),
       appDisabled: m.app_disabled(),
@@ -372,22 +378,26 @@
       noDescription: m.no_description(),
       installedSkills: m.installed_skills(),
       noSkills: m.no_local_skills(),
-      nativeSkills: isKorean ? "Codex 스킬" : "Codex skills",
-      nativeHooks: isKorean ? "Codex 훅" : "Codex hooks",
-      nativeSkillsDescription: isKorean
+      nativeSkills: isChinese ? "运行时技能" : isKorean ? "Codex 스킬" : "Codex skills",
+      nativeHooks: isChinese ? "运行时钩子" : isKorean ? "Codex 훅" : "Codex hooks",
+      nativeSkillsDescription: isChinese
+        ? "由执行引擎直接返回的可用技能与钩子。"
+        : isKorean
         ? "Codex app-server가 직접 반환한 활성 스킬과 훅입니다."
         : "Active skills and hooks returned directly by the Codex app-server.",
-      noNativeHooks: isKorean ? "등록된 훅이 없습니다." : "No hooks returned.",
-      mcpServers: isKorean ? "MCP 서버" : "MCP servers",
-      mcpServersDescription: isKorean
+      noNativeHooks: isChinese ? "暂无运行时钩子。" : isKorean ? "등록된 훅이 없습니다." : "No hooks returned.",
+      mcpServers: isChinese ? "MCP 服务" : isKorean ? "MCP 서버" : "MCP servers",
+      mcpServersDescription: isChinese
+        ? "执行引擎可见的 MCP 服务、工具、资源和认证状态。"
+        : isKorean
         ? "Codex가 인식한 MCP 서버와 도구, 리소스, 인증 상태입니다."
         : "MCP servers, tools, resources, and auth status visible to Codex.",
-      noMcpServers: isKorean ? "MCP 서버가 없습니다." : "No MCP servers returned.",
-      refreshMcp: isKorean ? "새로고침" : "Refresh",
-      oauthLogin: isKorean ? "인증" : "OAuth",
-      tools: isKorean ? "도구" : "Tools",
-      resources: isKorean ? "리소스" : "Resources",
-      resourceTemplates: isKorean ? "리소스 템플릿" : "Resource templates",
+      noMcpServers: isChinese ? "暂无 MCP 服务。" : isKorean ? "MCP 서버가 없습니다." : "No MCP servers returned.",
+      refreshMcp: isChinese ? "刷新" : isKorean ? "새로고침" : "Refresh",
+      oauthLogin: isChinese ? "认证" : isKorean ? "인증" : "OAuth",
+      tools: isChinese ? "工具" : isKorean ? "도구" : "Tools",
+      resources: isChinese ? "资源" : isKorean ? "리소스" : "Resources",
+      resourceTemplates: isChinese ? "资源模板" : isKorean ? "리소스 템플릿" : "Resource templates",
       openThread: m.open_thread(),
       themeEditor: m.theme_editor(),
       themeEditorDescription: m.theme_editor_description(),
@@ -712,9 +722,9 @@
       editorValue = nextFile.content;
       catalog = nextCatalog;
       apps = nextApps.data;
-      nativeSkills = nextNativeSkills.skills;
-      nativeHooks = nextNativeHooks.hooks;
-      mcpServers = nextMcp.data;
+      nativeSkills = nextNativeSkills.skills ?? [];
+      nativeHooks = nextNativeHooks.hooks ?? [];
+      mcpServers = nextMcp.data ?? [];
       auditEntries = nextAudit.entries;
       auditLoadedForAdmin = webRole !== "viewer";
     } catch (error) {
@@ -863,8 +873,8 @@
         api.listCodexSkills({ limit: 120 }),
         api.listCodexHooks({ limit: 120 })
       ]);
-      nativeSkills = nextSkills.skills;
-      nativeHooks = nextHooks.hooks;
+      nativeSkills = nextSkills.skills ?? [];
+      nativeHooks = nextHooks.hooks ?? [];
     } catch (error) {
       errorText = error instanceof Error ? error.message : ui.failedLoad;
     } finally {
@@ -881,7 +891,7 @@
 
     try {
       const payload = await api.listMcpServers({ detail, limit: 100 });
-      mcpServers = payload.data;
+      mcpServers = payload.data ?? [];
     } catch (error) {
       errorText = error instanceof Error ? error.message : ui.failedLoad;
     } finally {
@@ -936,7 +946,7 @@
 
     try {
       const payload = await api.getRuntimeProcesses();
-      runtimeProcesses = payload.processes;
+      runtimeProcesses = payload.processes ?? [];
     } catch (error) {
       errorText = error instanceof Error ? error.message : ui.failedLoad;
     } finally {

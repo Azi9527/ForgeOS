@@ -24,7 +24,7 @@
   "scripts": {
     "cli": "node ./bin/codex-webui.mjs",
     "ws:debug": "node ./scripts/ws-debug-client.mjs",
-    "paraglide:compile": "paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide --strategy cookie globalVariable preferredLanguage baseLocale --is-server 'import.meta.env.SSR' --emit-ts-declarations",
+    "paraglide:compile": "paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide --strategy cookie globalVariable baseLocale --is-server 'import.meta.env.SSR' --emit-ts-declarations",
     "dev": "pnpm paraglide:compile && vite dev",
     "build": "pnpm paraglide:compile && svelte-kit sync && node ./scripts/build-app.mjs",
     "build:e2e-fake": "cargo build --manifest-path backend/Cargo.toml --bin fake_codex_app_server",
@@ -36,6 +36,7 @@
     "verify:security-regressions": "node ./scripts/verify-security-regressions.mjs",
     "verify:low-memory-smoke": "node ./scripts/verify-low-memory-smoke.mjs",
     "verify:tunnel-safety": "node ./scripts/verify-tunnel-safety.mjs",
+    "test:frontend": "node --experimental-strip-types --test frontend-tests/*.test.mjs",
     "test:ws-client-backpressure": "node --test ./scripts/ws-client-backpressure.test.mjs",
     "test:gateway-release": "node --test ./scripts/gateway-release.test.mjs",
     "gateway:bundle": "node ./scripts/create-gateway-bundle.mjs",

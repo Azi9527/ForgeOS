@@ -41,7 +41,8 @@
     Keyboard,
     Monitor,
     Download,
-    UserCog
+    UserCog,
+    ArrowLeft
   } from "lucide-svelte";
   import { onMount, tick } from "svelte";
   import { fly, slide } from "svelte/transition";
@@ -59,11 +60,13 @@
   } from "$lib/chat-state";
   import { CODEX_SLASH_COMMANDS, findCodexSlashCommand, type CodexSlashCommandEntry } from "$lib/codex-commands";
   import AuthLoginOverlay from "$lib/components/AuthLoginOverlay.svelte";
-  import EnterpriseProjectPortal from "$lib/components/EnterpriseProjectPortal.svelte";
+  import EnterpriseRail from "$lib/components/EnterpriseRail.svelte";
+  import EnterpriseProjectPortal from "$lib/components/EnterpriseConsolePortal.svelte";
   import FolderBrowserDialog from "$lib/components/FolderBrowserDialog.svelte";
   import LazyMonacoDiffEditor from "$lib/components/LazyMonacoDiffEditor.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
   import ProjectLifecycleWorkspace from "$lib/components/ProjectLifecycleWorkspace.svelte";
+  import ProjectAuditWorkspace from "$lib/components/ProjectAuditWorkspace.svelte";
   import ProjectNavigationBar from "$lib/components/ProjectNavigationBar.svelte";
   import ProjectValidationWorkspace from "$lib/components/ProjectValidationWorkspace.svelte";
   import {
@@ -100,9 +103,18 @@
   import WorkspaceHeader from "$lib/components/WorkspaceHeader.svelte";
   import WorkspaceTabStrip from "$lib/components/WorkspaceTabStrip.svelte";
   import { isContextWindowExceededPayload, isUsageLimitErrorPayload, parseAppError } from "$lib/errors";
+  import type { EnterpriseSettingsTab } from "$lib/enterprise-navigation";
   import { describeUiError } from "$lib/ui-errors";
   import { activeLocale, localeOptions, localeSignal, updateLocale } from "$lib/i18n";
   import { m } from "$lib/paraglide/messages.js";
+  import {
+    buildProjectManifest,
+    buildProjectManifestPath,
+    buildProjectRootPath,
+    normalizeProjectFolderName,
+    normalizeProjectRootPath
+  } from "$lib/project-paths";
+  import { resolveProjectContext } from "$lib/project-context";
   import { getLocale } from "$lib/paraglide/runtime.js";
   import { anchoredPopoverStyle } from "$lib/popover-position";
   import {
@@ -187,6 +199,7 @@
     | "project-validation"
     | "project-release"
     | "project-operations"
+    | "project-audit"
     | "settings"
     | "computer"
     | "diagnostics"
@@ -196,7 +209,7 @@
     | `file:${string}`
     | `terminal:${string}`;
   type ComposerSettingsTabId = "session" | "security" | "skills";
-  type ProjectSection = "development" | "code" | "validation" | "release" | "operations" | "settings";
+  type ProjectSection = "development" | "code" | "validation" | "release" | "environment" | "audit" | "settings";
   type PlatformView = "portal" | "project";
   type TranscriptScrollAnchor = {
     turnId: string;
@@ -365,8 +378,8 @@
   let browserOpen = $state(false);
   let browserBusy = $state(false);
   let browserPurpose = $state<"session" | "project">("session");
+  let projectDirectoryMode = $state<"create" | "bind">("create");
   let projectNameDraft = $state("");
-  let projectNameTouched = $state(false);
   let runtimeBusyAction = $state<"install" | "update" | "check" | "status" | null>(null);
   let gatewayRestartBusy = $state(false);
   let quotaBusy = $state(false);
@@ -406,6 +419,8 @@
   let activeSessionFolder = $state<string | null>(null);
   let activeDiscoveredProjectRoot = $state<string | null>(null);
   let platformView = $state<PlatformView>("portal");
+  let enterpriseSettingsMode = $state(false);
+  let enterprisePortalInitialView = $state<"overview" | "projects">("overview");
   let showArchivedSessions = $state(false);
   let accountLoginFlow = $state<CodexAccountLoginFlow | null>(null);
   let composerSettingsOpen = $state(false);
@@ -448,7 +463,7 @@
   let diagnosticsTabOpen = $state(false);
   let memoryTabOpen = $state(false);
   let projectTabOpen = $state(false);
-  let settingsInitialTab = $state<"config" | "defaults" | "startup" | "audit" | "theme" | "notifications" | "presets" | "automations" | "apps" | "plugins" | "skills" | "mcp" | null>(null);
+  let settingsInitialTab = $state<"config" | "defaults" | "startup" | "processes" | "audit" | "theme" | "notifications" | "presets" | "automations" | "apps" | "plugins" | "skills" | "mcp" | null>(null);
   let gitDiffTabs = $state<GitDiffTab[]>([]);
   let codeDiffTabs = $state<CodeDiffTab[]>([]);
   let fileTabs = $state<FileTab[]>([]);
@@ -620,6 +635,7 @@
       loginLede: m.login_lede(),
       forgeTagline: m.forge_tagline(),
       forgeStory: m.forge_story(),
+      forgeDescription: m.forge_description(),
       forgeTaskDriven: m.forge_task_driven(),
       forgeValidationFirst: m.forge_validation_first(),
       forgeControlledExecution: m.forge_controlled_execution(),
@@ -1613,6 +1629,21 @@
   async function ensureSessionForComposer() {
     const selectedBinding = getSelectedSessionBinding();
     if (selectedBinding) {
+      const projectName = activeManagedProjectName();
+      if (projectName && config) {
+        try {
+          const project = await ensureManagedProjectRoot(projectName);
+          if (project?.rootPath && normalizeProjectRootPath(selectedBinding.state.preferences.cwd) !== normalizeProjectRootPath(project.rootPath)) {
+            errorText = $activeLocale === "zh-Hans"
+              ? `当前对话仍绑定旧目录 ${selectedBinding.state.preferences.cwd}，不能继续写入。请在“${project.name}”项目中新建开发对话，新的工作目录为 ${project.rootPath}。`
+              : `This conversation is still bound to ${selectedBinding.state.preferences.cwd}. Start a new conversation in ${project.name}; its workspace is ${project.rootPath}.`;
+            return null;
+          }
+        } catch (error) {
+          errorText = describeError(error);
+          return null;
+        }
+      }
       return selectedBinding;
     }
 
@@ -1629,7 +1660,27 @@
       return null;
     }
 
-    const draftState = conversation;
+    let draftState = conversation;
+    const projectName = activeManagedProjectName();
+    if (projectName) {
+      try {
+        const project = await ensureManagedProjectRoot(projectName);
+        if (!project?.rootPath) {
+          throw new Error(`项目“${projectName}”尚未建立独立目录。`);
+        }
+        activeSessionFolder = projectName;
+        const preferences = projectSessionPreferences(project, config.defaults);
+        draftState = {
+          ...draftState,
+          thread: { ...draftState.thread, cwd: preferences.cwd },
+          preferences
+        };
+        conversation = draftState;
+      } catch (error) {
+        errorText = describeError(error);
+        return null;
+      }
+    }
     const draftTextSnapshot = draft;
     const draftAttachmentSnapshot = [...draftAttachments];
     const draftTitleSnapshot = titleDraft.trim();
@@ -2358,12 +2409,12 @@
     }));
     const managedRoots = new Set(
       managedProjects
-        .map((project) => normalizeProjectRoot(project.rootPath))
+        .map((project) => normalizeProjectRootPath(project.rootPath))
         .filter((root): root is string => Boolean(root))
     );
     const discoveredByRoot = new Map<string, SessionSummary[]>();
     for (const session of sessions) {
-      const root = normalizeProjectRoot(session.cwd);
+      const root = normalizeProjectRootPath(session.cwd);
       if (!root || managedRoots.has(root)) {
         continue;
       }
@@ -2405,14 +2456,19 @@
     }
     return [...managedProjects, ...discoveredProjects];
   });
+  const activeProjectContext = $derived.by(() =>
+    resolveProjectContext({
+      projects: portalProjects,
+      sessions,
+      activeProjectName: activeSessionFolder,
+      selectedSessionId
+    })
+  );
   const workspaceSessions = $derived.by(() => {
-    const project = portalProjects.find((entry) => entry.name === activeSessionFolder) ?? null;
-    const managed = (config?.sessionOrganization.sessionFolders ?? []).some((entry) => entry.name === activeSessionFolder);
-    if (!project || managed || !project.rootPath) {
+    if (!activeProjectContext) {
       return sessions;
     }
-    const projectRoot = normalizeProjectRoot(project.rootPath);
-    return sessions.filter((session) => normalizeProjectRoot(session.cwd) === projectRoot);
+    return activeProjectContext.sessions;
   });
   const sessionHighlights = $derived.by(() =>
     Object.fromEntries(
@@ -6180,7 +6236,6 @@
     browserBusy = false;
     browserPurpose = "session";
     projectNameDraft = "";
-    projectNameTouched = false;
     directoryPayload = null;
     requestAnswers = {};
     rawRequestResponses = {};
@@ -6599,6 +6654,7 @@
 
   async function selectSession(sessionId: string, profileId: string | null = null) {
     platformView = "project";
+    enterpriseSettingsMode = false;
     const currentSelectionProfileId =
       selectedSessionId === sessionId
         ? (selectedSessionProfileId ?? conversation?.profileId ?? sessionProfileIdsBySessionId[sessionId] ?? activeProfileId)
@@ -6625,12 +6681,18 @@
         : null) ??
       matchingSummaries[0] ??
       null;
-    const containingProject = config?.sessionOrganization.sessionFolders.find((folder) =>
-      summaryForSelection?.tags.includes(folder.name)
-    );
-    if (containingProject) {
-      activeSessionFolder = containingProject.name;
-    }
+    const contextSessions = summaryForSelection && !sessions.some((session) => session.id === summaryForSelection.id)
+      ? [...sessions, summaryForSelection]
+      : sessions;
+    const containingProject = resolveProjectContext({
+      projects: portalProjects,
+      sessions: contextSessions,
+      activeProjectName: null,
+      selectedSessionId: summaryForSelection?.id ?? null
+    })?.project ?? null;
+    activeSessionFolder = containingProject?.name ?? null;
+    activeDiscoveredProjectRoot = containingProject?.managed === false ? containingProject.rootPath : null;
+    activeSavedSessionFilterId = null;
     const resolvedProfileId = profileId ?? summaryForSelection?.profileId ?? sessionProfileIdsBySessionId[sessionId] ?? activeProfileId;
     const selectionScopeKey = sessionStateKey(sessionId, resolvedProfileId);
     const selectionVersion = sessionSelectionVersion + 1;
@@ -8488,6 +8550,18 @@
       return;
     }
 
+    const projectName = activeManagedProjectName();
+    let project = projectByName(projectName);
+    if (projectName) {
+      try {
+        project = await ensureManagedProjectRoot(projectName);
+        activeSessionFolder = projectName;
+      } catch (error) {
+        errorText = describeError(error);
+        return;
+      }
+    }
+
     showArchivedSessions = false;
     sessionSearchQuery = "";
     sessionSearchScope = "summary";
@@ -8495,7 +8569,7 @@
     mobileSidebarOpen = false;
     draftSelectedSkills = [];
     composerSkillQuery = "";
-    activateDraftSession(projectSessionPreferences(projectByName(activeSessionFolder), config.defaults));
+    activateDraftSession(projectSessionPreferences(project, config.defaults));
   }
 
   function isHundredMContextEnabled(preferences: SessionPreferences | null | undefined) {
@@ -11183,8 +11257,8 @@
   async function openBrowser(startPath: string | null, purpose: "session" | "project" = "session") {
     browserPurpose = purpose;
     if (purpose === "project") {
+      projectDirectoryMode = "create";
       projectNameDraft = "";
-      projectNameTouched = false;
     }
     browserOpen = true;
     await browseTo(startPath);
@@ -11194,9 +11268,6 @@
     browserBusy = true;
     try {
       directoryPayload = await api.browseDirectories(currentPath);
-      if (browserPurpose === "project" && !projectNameTouched && directoryPayload.currentPath) {
-        projectNameDraft = directoryPayload.currentPath.split(/[\\/]/u).filter(Boolean).at(-1) ?? "Project";
-      }
     } catch (error) {
       errorText = describeError(error);
     } finally {
@@ -11216,15 +11287,18 @@
       return;
     }
 
-    const projectName = projectNameDraft.trim();
-    if (!projectName) {
-      return;
-    }
-
     try {
+      const projectName = normalizeProjectFolderName(projectNameDraft);
       const existingProject = projectByName(projectName);
+      const rootPath = projectDirectoryMode === "create" ? buildProjectRootPath(nextPath, projectName) : nextPath;
+      if (projectDirectoryMode === "create") {
+        await api.saveEditableFile(
+          buildProjectManifestPath(rootPath),
+          buildProjectManifest(projectName, rootPath)
+        );
+      }
       const response = await api.upsertSessionFolder(projectName, existingProject?.pinned ?? false, {
-        rootPath: nextPath,
+        rootPath,
         markOpened: true,
         settings: existingProject?.settings ?? { model: null }
       });
@@ -11234,12 +11308,23 @@
       });
       browserOpen = false;
       browserPurpose = "session";
+      projectDirectoryMode = "create";
       projectNameDraft = "";
-      projectNameTouched = false;
       await openSessionFolder(response.folder.name);
       noticeText = m.session_folder_created_notice({ name: response.folder.name });
     } catch (error) {
       errorText = describeError(error);
+    }
+  }
+
+  function projectDirectoryPreview() {
+    if (browserPurpose !== "project" || projectDirectoryMode !== "create" || !directoryPayload?.currentPath || !projectNameDraft.trim()) {
+      return null;
+    }
+    try {
+      return buildProjectRootPath(directoryPayload.currentPath, projectNameDraft);
+    } catch {
+      return null;
     }
   }
 
@@ -11284,6 +11369,7 @@
   }
 
   function openSettingsTab(tab: typeof settingsInitialTab = "config") {
+    enterpriseSettingsMode = true;
     settingsInitialTab = tab;
     settingsTabOpen = true;
     activeWorkspaceTabId = "settings";
@@ -11314,6 +11400,10 @@
 
   function closeSettingsTab() {
     settingsTabOpen = false;
+    if (enterpriseSettingsMode) {
+      openProjectPortal();
+      return;
+    }
     if (activeWorkspaceTabId === "settings") {
       activeWorkspaceTabId = "chat";
     }
@@ -11728,11 +11818,6 @@
     scheduleSessionRefresh(0);
   }
 
-  function normalizeProjectRoot(value: string | null | undefined) {
-    const normalized = value?.trim().replace(/^\\\\\?\\/u, "").replace(/[\\/]+$/u, "").toLocaleLowerCase() ?? "";
-    return normalized || null;
-  }
-
   function managedProjectByName(folderName: string | null) {
     if (!folderName) {
       return null;
@@ -11747,16 +11832,62 @@
     return portalProjects.find((project) => project.name === folderName) ?? null;
   }
 
+  function activeManagedProjectName() {
+    if (activeSessionFolder && managedProjectByName(activeSessionFolder)) {
+      return activeSessionFolder;
+    }
+    const selectedSession = selectedSessionId ? sessions.find((session) => session.id === selectedSessionId) : null;
+    return selectedSession?.tags.find((tag) => Boolean(managedProjectByName(tag))) ?? null;
+  }
+
   function projectSessionPreferences(project: SessionFolder | null, defaults: SessionPreferences) {
     if (!project) {
       return defaults;
     }
+    let projectRoot = project.rootPath;
+    if (!projectRoot) {
+      try {
+        projectRoot = buildProjectRootPath(defaults.cwd, project.name);
+      } catch {
+        projectRoot = null;
+      }
+    }
     return {
       ...defaults,
-      cwd: project.rootPath ?? defaults.cwd,
+      cwd: projectRoot ?? defaults.cwd,
       gitRepoPath: project.repoPath ?? defaults.gitRepoPath,
       model: project.settings?.model ?? defaults.model
     };
+  }
+
+  async function ensureManagedProjectRoot(folderName: string) {
+    const existingProject = managedProjectByName(folderName) ?? projectByName(folderName);
+    if (existingProject?.rootPath) {
+      return existingProject;
+    }
+    if (!config) {
+      return existingProject;
+    }
+
+    const projectName = normalizeProjectFolderName(folderName);
+    const rootPath = buildProjectRootPath(config.defaults.cwd, projectName);
+    await api.saveEditableFile(
+      buildProjectManifestPath(rootPath),
+      buildProjectManifest(projectName, rootPath)
+    );
+    const response = await api.upsertSessionFolder(projectName, existingProject?.pinned ?? false, {
+      rootPath,
+      markOpened: true,
+      settings: existingProject?.settings ?? { model: null }
+    });
+    updateConfigSessionOrganization({
+      knownTags: response.knownTags,
+      sessionFolders: response.sessionFolders
+    });
+    noticeText = $activeLocale === "zh-Hans"
+      ? `已为“${projectName}”建立独立项目目录：${rootPath}`
+      : `Created a dedicated project folder for ${projectName}: ${rootPath}`;
+    return response.folder;
   }
 
   function projectSectionForWorkspaceTab(): ProjectSection {
@@ -11770,7 +11901,10 @@
       return "release";
     }
     if (activeWorkspaceTabId === "project-operations") {
-      return "operations";
+      return "environment";
+    }
+    if (activeWorkspaceTabId === "project-audit") {
+      return "audit";
     }
     if (activeWorkspaceTabId === "project" || activeWorkspaceTabId === "settings") {
       return "settings";
@@ -11778,7 +11912,19 @@
     return "development";
   }
 
-  function openProjectPortal() {
+  function shouldShowWorkspaceTabStrip() {
+    return (
+      activeWorkspaceTabId.startsWith("git-diff:") ||
+      activeWorkspaceTabId.startsWith("code-diff:") ||
+      activeWorkspaceTabId.startsWith("file:") ||
+      activeWorkspaceTabId.startsWith("terminal:")
+    );
+  }
+
+  function openProjectPortal(view: "overview" | "projects" = "overview") {
+    enterprisePortalInitialView = view;
+    enterpriseSettingsMode = false;
+    settingsTabOpen = false;
     platformView = "portal";
     activeSessionFolder = null;
     activeDiscoveredProjectRoot = null;
@@ -11793,7 +11939,40 @@
     scheduleSessionRefresh(0);
   }
 
+  function openEnterpriseSettings(tab: NonNullable<typeof settingsInitialTab>) {
+    platformView = "project";
+    syncPlatformViewInUrl("project");
+    openSettingsTab(tab);
+  }
+
+  function enterpriseSettingsTitle(tab: typeof settingsInitialTab) {
+    const labels: Record<NonNullable<typeof settingsInitialTab>, string> = {
+      config: "企业平台设置",
+      defaults: "模型与执行策略",
+      startup: "启动与网关",
+      processes: "运行节点",
+      audit: "安全与审计",
+      theme: "界面与品牌",
+      notifications: "通知中心",
+      presets: "指令模板",
+      automations: "自动化任务",
+      apps: "应用与工具",
+      plugins: "扩展组件",
+      skills: "技能与专家",
+      mcp: "开放集成"
+    };
+    return tab ? labels[tab] : "企业平台设置";
+  }
+
+  async function openEnterpriseSession(sessionId: string, profileId: string | null) {
+    enterpriseSettingsMode = false;
+    platformView = "project";
+    syncPlatformViewInUrl("project");
+    await selectSession(sessionId, profileId);
+  }
+
   async function openProject(project: SessionFolder) {
+    enterpriseSettingsMode = false;
     platformView = "project";
     syncPlatformViewInUrl("project");
     if (managedProjectByName(project.name)) {
@@ -11813,7 +11992,7 @@
     const preferredSession =
       sessions.find((session) => session.id === project.lastSessionId) ??
       sessions
-        .filter((session) => normalizeProjectRoot(session.cwd) === normalizeProjectRoot(project.rootPath))
+        .filter((session) => normalizeProjectRootPath(session.cwd) === normalizeProjectRootPath(project.rootPath))
         .sort((left, right) => right.updatedAt - left.updatedAt)[0] ??
       null;
     if (preferredSession && (await selectSession(preferredSession.id, preferredSession.profileId ?? null))) {
@@ -11839,6 +12018,7 @@
       return;
     }
     if (section === "code") {
+      handleRepoSelect(project.repoPath ?? project.rootPath);
       openGitTab();
       return;
     }
@@ -11846,7 +12026,7 @@
       openProjectSettings(projectByName(project.name) ?? project);
       return;
     }
-    activeWorkspaceTabId = `project-${section}`;
+    activeWorkspaceTabId = section === "environment" ? "project-operations" : `project-${section}`;
     workspaceMenuOpen = false;
   }
 
@@ -11855,8 +12035,8 @@
       errorText = readOnlyRole ? m.error_forbidden_role() : "项目缺少可纳管的根目录。";
       return;
     }
-    const projectRoot = normalizeProjectRoot(project.rootPath);
-    const projectSessions = sessions.filter((session) => normalizeProjectRoot(session.cwd) === projectRoot);
+    const projectRoot = normalizeProjectRootPath(project.rootPath);
+    const projectSessions = sessions.filter((session) => normalizeProjectRootPath(session.cwd) === projectRoot);
     try {
       const created = await api.upsertSessionFolder(project.name, project.pinned, {
         rootPath: project.rootPath,
@@ -11923,37 +12103,49 @@
       return;
     }
 
-    const project = projectByName(folderName);
+    let project = projectByName(folderName);
     try {
       const response = await api.upsertSessionFolder(folderName, null, { markOpened: true });
       updateConfigSessionOrganization({
         knownTags: response.knownTags,
         sessionFolders: response.sessionFolders
       });
-    } catch {
-      // Opening an existing project remains available when metadata persistence is temporarily unavailable.
+      project = await ensureManagedProjectRoot(folderName);
+    } catch (error) {
+      errorText = describeError(error);
+      return;
     }
 
-    const preferredSessionId =
-      project?.lastSessionId ??
-      sessions
-        .filter((session) => session.tags.includes(folderName) && !session.archived)
-        .sort((left, right) => right.updatedAt - left.updatedAt)[0]?.id ??
-      null;
-    if (preferredSessionId && (await selectSession(preferredSessionId))) {
+    const projectRoot = normalizeProjectRootPath(project?.rootPath);
+    const eligibleProjectSessions = sessions
+      .filter(
+        (session) =>
+          session.tags.includes(folderName) &&
+          !session.archived &&
+          normalizeProjectRootPath(session.cwd) === projectRoot
+      )
+      .sort((left, right) => right.updatedAt - left.updatedAt);
+    const preferredSession =
+      eligibleProjectSessions.find((session) => session.id === project?.lastSessionId) ?? eligibleProjectSessions[0] ?? null;
+    if (preferredSession && (await selectSession(preferredSession.id, preferredSession.profileId ?? null))) {
       return;
     }
 
     await refreshSessions();
     const latestProjectSession = sessions
-      .filter((session) => session.tags.includes(folderName) && !session.archived)
+      .filter(
+        (session) =>
+          session.tags.includes(folderName) &&
+          !session.archived &&
+          normalizeProjectRootPath(session.cwd) === projectRoot
+      )
       .sort((left, right) => right.updatedAt - left.updatedAt)[0] ?? null;
     if (latestProjectSession && (await selectSession(latestProjectSession.id, latestProjectSession.profileId ?? null))) {
       return;
     }
 
     if (config) {
-      activateDraftSession(projectSessionPreferences(projectByName(folderName), config.defaults));
+      activateDraftSession(projectSessionPreferences(project, config.defaults));
     }
   }
 
@@ -12014,8 +12206,8 @@
       return;
     }
     browserPurpose = "project";
+    projectDirectoryMode = "bind";
     projectNameDraft = folder.name;
-    projectNameTouched = true;
     browserOpen = true;
     await browseTo(folder.rootPath ?? config.defaults.cwd);
   }
@@ -12094,8 +12286,8 @@
     if (managed || !project.rootPath) {
       return results;
     }
-    const projectRoot = normalizeProjectRoot(project.rootPath);
-    return results.filter((session) => normalizeProjectRoot(session.cwd) === projectRoot);
+    const projectRoot = normalizeProjectRootPath(project.rootPath);
+    return results.filter((session) => normalizeProjectRootPath(session.cwd) === projectRoot);
   }
 
   async function setSelectedSessionFolderMembership(folderName: string, inFolder: boolean) {
@@ -13970,7 +14162,7 @@
           "MCP call": m.mcp_call(),
           "Web search": m.web_search(),
           "Code edit": m.code_edit(),
-          Reasoning: m.reasoning(),
+          Reasoning: m.reasoning_process(),
           Plan: m.planned_strategy()
         };
         return localizedTitles[title] ?? title;
@@ -15179,6 +15371,20 @@
 
   <!-- Project conversation navigation -->
   {#if platformView === "project"}
+  {#if enterpriseSettingsMode}
+    <EnterpriseRail
+      activeSettingsTab={settingsInitialTab as EnterpriseSettingsTab | null}
+      projectCount={portalProjects.length}
+      conversationCount={portalProjects.reduce((total, project) => total + project.sessionCount, 0)}
+      recentSession={[...sessions].sort((left, right) => right.updatedAt - left.updatedAt)[0] ?? null}
+      {runtime}
+      automationCount={config?.automations.items.length ?? 0}
+      unreadNotifications={config?.notifications.unreadCount ?? 0}
+      onOpenView={(view) => openProjectPortal(view)}
+      onOpenSettings={(tab) => openEnterpriseSettings(tab)}
+      onOpenSession={(sessionId, profileId) => openEnterpriseSession(sessionId, profileId)}
+    />
+  {:else}
   <aside
     class:hidden={!mobileSidebarOpen && isMobileLayout}
     class={[
@@ -15231,6 +15437,7 @@
 	      knownSessionTags={config?.sessionOrganization.knownTags ?? []}
 	      sessionFolders={config?.sessionOrganization.sessionFolders ?? []}
 	      {activeSessionFolder}
+	      currentProject={activeProjectContext?.project ?? null}
 	      {activeSavedSessionFilterId}
       showArchived={showArchivedSessions}
       showCloseButton={isMobileLayout}
@@ -15251,6 +15458,7 @@
       onLogoutWeb={() => {
         void logoutWebUi();
       }}
+      onOpenPortal={openProjectPortal}
       onRefreshQuota={() => {
         void refreshQuota(true);
       }}
@@ -15352,22 +15560,56 @@
     />
   </aside>
   {/if}
+  {/if}
 
   <!-- Main Content -->
   <main class="forge-workspace flex-1 flex flex-col h-full min-w-0 relative">
     {#if platformView === "portal"}
       <EnterpriseProjectPortal
+        initialView={enterprisePortalInitialView}
         projects={portalProjects}
         {sessions}
+        {runtime}
+        {quota}
+        automationCount={config?.automations.items.length ?? 0}
+        unreadNotifications={config?.notifications.unreadCount ?? 0}
         readOnly={readOnlyRole}
         onCreateProject={() => createSessionFolder()}
         onOpenProject={(project) => openProject(project)}
         onManageProject={(project) => manageDiscoveredProject(project)}
         onOpenSection={(project, section) => openProjectSection(project, section)}
+        onOpenSession={(sessionId, profileId) => openEnterpriseSession(sessionId, profileId)}
+        onOpenSettings={(tab) => openEnterpriseSettings(tab)}
       />
     {:else}
+    {#if enterpriseSettingsMode}
+      <header class="flex min-h-[72px] shrink-0 items-center gap-4 border-b border-slate-200 bg-white px-4 sm:px-6" data-testid="enterprise-settings-header">
+        <button class="inline-flex h-9 items-center gap-2 rounded-lg px-2.5 text-xs font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-900" onclick={() => openProjectPortal()} type="button"><ArrowLeft size={15} />企业工作台</button>
+        <div class="h-6 w-px bg-slate-200"></div>
+        <div class="min-w-0"><p class="text-[9px] font-bold uppercase tracking-[0.2em] text-violet-600">企业控制台 · 二级工作面</p><h1 class="truncate text-base font-black text-slate-950">{enterpriseSettingsTitle(settingsInitialTab)}</h1></div>
+      </header>
+    {:else}
+    <div
+      class:project-shell-command={Boolean(activeProjectContext) && projectSectionForWorkspaceTab() === "development"}
+      class="shrink-0"
+    >
+    {#if activeProjectContext}
+      {@const workspaceProject = activeProjectContext.project}
+      {#if workspaceProject}
+        <ProjectNavigationBar
+          active={projectSectionForWorkspaceTab()}
+          embedded={projectSectionForWorkspaceTab() === "development"}
+          project={workspaceProject}
+          onHome={() => openProjectPortal("projects")}
+          onNavigate={(section) => openProjectSection(workspaceProject, section)}
+        />
+      {/if}
+    {/if}
+
+    {#if !activeProjectContext || projectSectionForWorkspaceTab() === "development"}
     <WorkspaceHeader
       activeWorkspaceTabId={activeWorkspaceTabId}
+      projectMode={Boolean(activeProjectContext)}
       bind:searchTriggerElement={sessionTurnSearchTriggerElement}
       bind:titleDraft={titleDraft}
       bind:titleInputElement={titleInputElement}
@@ -15408,21 +15650,11 @@
       }}
       onToggleSearch={toggleSessionTurnSearch}
     />
-
-    {#if projectByName(activeSessionFolder)}
-      {@const workspaceProject = projectByName(activeSessionFolder)}
-      {#if workspaceProject}
-        <ProjectNavigationBar
-          active={projectSectionForWorkspaceTab()}
-          project={workspaceProject}
-          onHome={openProjectPortal}
-          onNavigate={(section) => openProjectSection(workspaceProject, section)}
-        />
-      {/if}
     {/if}
+    </div>
 
     <!-- Workspace Tabs -->
-    {#if workspaceTabs.length > 1}
+    {#if workspaceTabs.length > 1 && shouldShowWorkspaceTabStrip()}
       <WorkspaceTabStrip
         activeTabId={activeWorkspaceTabId}
         tabs={workspaceTabs}
@@ -15473,6 +15705,7 @@
           }
         }}
       />
+    {/if}
     {/if}
 
     <div class="flex-1 overflow-hidden relative">
@@ -16907,8 +17140,8 @@
             </section>
           </div>
         </div>
-      {:else if activeWorkspaceTabId === "project" && projectByName(activeSessionFolder)}
-        {@const activeProject = projectByName(activeSessionFolder)}
+      {:else if activeWorkspaceTabId === "project" && activeProjectContext}
+        {@const activeProject = activeProjectContext.project}
         <div class="h-full overflow-y-auto" style="background: var(--bg);">
           {#if ProjectWorkspaceView && activeProject}
             <ProjectWorkspaceView
@@ -16932,13 +17165,13 @@
             </div>
           {/if}
         </div>
-      {:else if activeWorkspaceTabId === "project-validation" && projectByName(activeSessionFolder)}
-        {@const validationProject = projectByName(activeSessionFolder)}
+      {:else if activeWorkspaceTabId === "project-validation" && activeProjectContext}
+        {@const validationProject = activeProjectContext.project}
         {#if validationProject}
           <ProjectValidationWorkspace project={validationProject} readOnly={readOnlyRole} />
         {/if}
-      {:else if (activeWorkspaceTabId === "project-release" || activeWorkspaceTabId === "project-operations") && projectByName(activeSessionFolder)}
-        {@const lifecycleProject = projectByName(activeSessionFolder)}
+      {:else if (activeWorkspaceTabId === "project-release" || activeWorkspaceTabId === "project-operations") && activeProjectContext}
+        {@const lifecycleProject = activeProjectContext.project}
         {#if lifecycleProject}
           <ProjectLifecycleWorkspace
             project={lifecycleProject}
@@ -16947,6 +17180,8 @@
             onConfigure={() => openProjectSettings(lifecycleProject)}
           />
         {/if}
+      {:else if activeWorkspaceTabId === "project-audit" && activeProjectContext}
+        <ProjectAuditWorkspace project={activeProjectContext.project} />
       {:else if activeWorkspaceTabId === "settings"}
         <div class="h-full overflow-y-auto bg-gray-50/30 p-5 sm:p-8">
           <div class="mx-auto w-full max-w-7xl">
@@ -17377,7 +17612,11 @@
   <FolderBrowserDialog
     busy={browserBusy}
     closeLabel={m.close_folder_picker()}
-    confirmLabel={browserPurpose === "project" ? ($activeLocale === "zh-Hans" ? "创建项目" : "Create project") : ui.selectFolder}
+    confirmLabel={browserPurpose === "project"
+      ? projectDirectoryMode === "create"
+        ? ($activeLocale === "zh-Hans" ? "创建项目" : "Create project")
+        : ($activeLocale === "zh-Hans" ? "绑定目录" : "Bind folder")
+      : ui.selectFolder}
     {directoryPayload}
     loadingLabel={m.scanning_folders()}
     nameLabel={browserPurpose === "project" ? m.session_folder_name_prompt() : null}
@@ -17386,16 +17625,22 @@
     onClose={() => {
       browserOpen = false;
       browserPurpose = "session";
+      projectDirectoryMode = "create";
       projectNameDraft = "";
-      projectNameTouched = false;
     }}
     onConfirm={confirmDirectorySelection}
     onNameChange={(value) => {
       projectNameDraft = value;
-      projectNameTouched = true;
     }}
-    subtitle={m.allowed_root_paths()}
-    title={browserPurpose === "project" ? ($activeLocale === "zh-Hans" ? "选择项目根目录" : "Select project root") : m.select_working_folder()}
+    subtitle={browserPurpose === "project" && projectDirectoryMode === "create"
+      ? ($activeLocale === "zh-Hans" ? "将在所选位置创建与项目同名的独立文件夹" : "A dedicated folder named after the project will be created here")
+      : m.allowed_root_paths()}
+    targetPathPreview={projectDirectoryPreview()}
+    title={browserPurpose === "project"
+      ? projectDirectoryMode === "create"
+        ? ($activeLocale === "zh-Hans" ? "选择项目保存位置" : "Select project location")
+        : ($activeLocale === "zh-Hans" ? "选择已有项目目录" : "Select existing project folder")
+      : m.select_working_folder()}
   />
 {/if}
 {/if}
@@ -18560,7 +18805,7 @@
           <Zap size={16} />
         </div>
         <div class="min-w-0">
-          <h4 class="text-[10px] font-bold uppercase tracking-widest leading-none text-amber-700">{m.reasoning()}</h4>
+          <h4 class="text-[10px] font-bold uppercase tracking-widest leading-none text-amber-700">{m.reasoning_process()}</h4>
           {#if Array.isArray(item.summary) && item.summary.length > 0}
             <p class="mt-1 text-xs leading-relaxed text-amber-700/80 break-words">
               {m.steps_count({ count: String(item.summary.length) })}
@@ -18581,6 +18826,11 @@
                 <MarkdownMessage compact expandLabel={ui.showFullMessage} maxInitialChars={compactMarkdownInitialChars} on:openLocalPath={(event: CustomEvent<{ href: string }>) => openFileFromMessage(event.detail.href)} text={summaryEntry} />
               </div>
             {/each}
+          </div>
+        {/if}
+        {#if !String(item.text ?? "").trim() && (!Array.isArray(item.summary) || item.summary.length === 0)}
+          <div class="rounded-xl border border-amber-100 bg-amber-50/60 px-3 py-3 text-sm leading-relaxed text-amber-900/75">
+            {m.reasoning_summary_unavailable()}
           </div>
         {/if}
       </div>
