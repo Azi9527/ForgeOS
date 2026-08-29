@@ -56,6 +56,21 @@ async function wsRequest<T>(
   );
 }
 
+async function wsRequestFromFreshPage<T>(
+  page: import("@playwright/test").Page,
+  method: string,
+  params: Record<string, unknown>,
+  timeoutMs = 15_000
+) {
+  const requestPage = await page.context().newPage();
+  try {
+    await requestPage.goto("/");
+    return await wsRequest<T>(requestPage, method, params, timeoutMs);
+  } finally {
+    await requestPage.close();
+  }
+}
+
 function shellQuote(value: string) {
   if (process.platform === "win32") {
     return `'${value.replaceAll("'", "''")}'`;
@@ -126,7 +141,7 @@ test("opens a project folder into release and operations workspaces", async ({ p
   } finally {
     try {
       if (projectId) {
-        const removed = await wsRequest(page, "project/archive", {
+        const removed = await wsRequestFromFreshPage(page, "project/archive", {
           projectId
         });
         expect(removed.ok, removed.error).toBeTruthy();
@@ -216,7 +231,8 @@ test("runs the real ForgeOS repository build through gateway validation and reco
   } finally {
     try {
       if (projectId && registeredForPilot) {
-        await wsRequest(page, "project/archive", { projectId });
+        const archived = await wsRequestFromFreshPage(page, "project/archive", { projectId });
+        expect(archived.ok, archived.error).toBeTruthy();
       }
     } finally {
       if (previousManifest) {
