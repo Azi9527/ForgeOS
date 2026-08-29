@@ -152,3 +152,12 @@ test("a project-scoped draft resolves its stable project id before applying work
     /activateDraftSession\(projectSessionPreferences\(requestedProject, config\.defaults\)\)/u
   );
 });
+
+test("a registered project exposes its immutable root without a broken change-root action", async () => {
+  const source = await readFile(new URL("../src/lib/components/ProjectWorkspace.svelte", import.meta.url), "utf8");
+
+  assert.match(source, /project\.rootPath/u);
+  assert.match(source, /根目录已锁定/u);
+  assert.match(source, /Import another directory as a new project/u);
+  assert.doesNotMatch(source, /更换根目录|Change root/u);
+});

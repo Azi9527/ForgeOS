@@ -29,8 +29,33 @@ test("managed project validation is executed and evidenced only by the gateway",
 
   assert.match(api, /"projectLifecycle\/validation\/run"/u);
   assert.match(api, /"projectLifecycle\/validation\/cancel"/u);
-  assert.doesNotMatch(api, /"projectLifecycle\/validation\/record"/u);
   assert.match(dispatch, /"projectLifecycle\/validation\/run"/u);
   assert.match(dispatch, /"projectLifecycle\/validation\/cancel"/u);
-  assert.doesNotMatch(dispatch, /"projectLifecycle\/validation\/record"/u);
+  assert.match(dispatch, /"projectLifecycle\/validation\/record"[\s\S]*run_legacy_project_validation_payload/u);
+  assert.doesNotMatch(workspace, /recordProjectValidation/u);
+});
+
+test("validation mutations preserve visible evidence and reload authority on revision conflicts", async () => {
+  const workspace = await readFile(workspacePath, "utf8");
+  const mutationHandlerStart = workspace.indexOf("async function handleMutationFailure(");
+  const saveStart = workspace.indexOf("async function saveConfiguration(", mutationHandlerStart);
+  const initialRestoreStart = workspace.indexOf("async function restoreLifecycle(", saveStart);
+  assert.notEqual(mutationHandlerStart, -1);
+  assert.notEqual(saveStart, -1);
+  assert.notEqual(initialRestoreStart, -1);
+
+  const mutationHandler = workspace.slice(mutationHandlerStart, saveStart);
+  const mutationActions = workspace.slice(saveStart, initialRestoreStart);
+  const initialRestore = workspace.slice(initialRestoreStart);
+  assert.match(mutationHandler, /isRevisionConflict\(message\)/u);
+  assert.match(mutationHandler, /const generation = \+\+loadGeneration/u);
+  assert.match(mutationHandler, /api\.getProjectLifecycle\(targetProjectId\)/u);
+  assert.match(mutationHandler, /applyLifecycle\(lifecycle\)/u);
+  assert.match(mutationHandler, /当前画面已保留/u);
+  assert.doesNotMatch(mutationHandler, /showGatewayFailure/u);
+  assert.match(mutationActions, /handleMutationFailure\("验证配置未保存"/u);
+  assert.match(mutationActions, /handleMutationFailure\("网关验证未完成"/u);
+  assert.match(mutationActions, /handleMutationFailure\("验证停止请求失败"/u);
+  assert.doesNotMatch(mutationActions, /showGatewayFailure/u);
+  assert.match(initialRestore, /showGatewayFailure\(`无法从项目网关读取验证证据/u);
 });

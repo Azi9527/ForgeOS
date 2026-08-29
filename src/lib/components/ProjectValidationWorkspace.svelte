@@ -73,6 +73,32 @@
     error = `${message}。未展示任何本机缓存。`;
   }
 
+  function describeFailure(cause: unknown) {
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+
+  function isRevisionConflict(message: string) {
+    return /\b(?:changed|conflict|revision)\b|\b409\b|已变更|冲突/iu.test(message);
+  }
+
+  async function handleMutationFailure(prefix: string, cause: unknown, targetProjectId: string) {
+    if (project.projectId !== targetProjectId) return;
+    const message = describeFailure(cause);
+    error = `${prefix}：${message}`;
+    if (!isRevisionConflict(message)) return;
+
+    const generation = ++loadGeneration;
+    try {
+      const lifecycle = await api.getProjectLifecycle(targetProjectId);
+      if (generation !== loadGeneration || project.projectId !== targetProjectId) return;
+      applyLifecycle(lifecycle);
+      error = `${prefix}：${message}。已自动重新加载项目网关中的最新状态，请重试。`;
+    } catch (reloadCause) {
+      if (generation !== loadGeneration || project.projectId !== targetProjectId) return;
+      error = `${prefix}：${message}。重新加载权威状态失败：${describeFailure(reloadCause)}。当前画面已保留，请稍后重试。`;
+    }
+  }
+
   async function saveConfiguration() {
     if (readOnly || persistenceMode !== "gateway" || lifecycleRevision === null) return;
     const targetProjectId = projectId();
@@ -84,7 +110,7 @@
       applyLifecycle(lifecycle);
       configurationOpen = false;
     } catch (cause) {
-      showGatewayFailure(`验证配置未保存：${cause instanceof Error ? cause.message : String(cause)}`);
+      await handleMutationFailure("验证配置未保存", cause, targetProjectId);
     }
   }
 
@@ -130,7 +156,7 @@
       applyLifecycle(lifecycle);
       expandedRunId = lifecycle.validation.runs[0]?.id ?? null;
     } catch (cause) {
-      showGatewayFailure(`网关验证未完成：${cause instanceof Error ? cause.message : String(cause)}`);
+      await handleMutationFailure("网关验证未完成", cause, targetProjectId);
     } finally {
       running = false;
       cancelling = false;
@@ -152,7 +178,7 @@
         if (lifecycle.validation.runs[0]?.status !== "running") break;
       }
     } catch (cause) {
-      showGatewayFailure(`验证停止请求失败：${cause instanceof Error ? cause.message : String(cause)}`);
+      await handleMutationFailure("验证停止请求失败", cause, targetProjectId);
     } finally {
       cancelling = false;
     }

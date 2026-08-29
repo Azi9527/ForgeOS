@@ -59,6 +59,7 @@ import type {
   ProjectRegistryPayload,
   ProjectRelease,
   ProjectValidationCheck,
+  ProjectValidationRun,
   SavedSessionFilter,
   SelectedSkill,
   SessionDetailPayload,
@@ -1149,6 +1150,15 @@ export const api = {
     return ws.request<ProjectLifecyclePayload>(
       "projectLifecycle/validation/run",
       { projectId, expectedRevision },
+      PROJECT_OPERATION_TIMEOUT_MS
+    );
+  },
+
+  /** @deprecated The gateway ignores client-reported evidence and reruns validation authoritatively. */
+  recordProjectValidation(projectId: string, run: ProjectValidationRun, revision: number | null = null) {
+    return ws.request<ProjectLifecyclePayload>(
+      "projectLifecycle/validation/record",
+      { projectId, run, revision },
       PROJECT_OPERATION_TIMEOUT_MS
     );
   },
