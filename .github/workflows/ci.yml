@@ -91,7 +91,7 @@ jobs:
   windows-e2e:
     name: Windows E2E
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     env:
       CODEX_WEBUI_E2E_PORT: "44173"
