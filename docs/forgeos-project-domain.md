@@ -107,7 +107,19 @@ Conversation / Turn
 
 ## 5. 网关持久化
 
-建议在当前 profile 的 `CODEX_WEBUI_DATA_DIR` 下建立：
+Registry V2 第一阶段复用当前 profile 已具备原子写入、备份恢复和并发锁的
+`ui-state.json`，新增独立顶层区域：
+
+```text
+projectRegistry
+  schemaVersion: 2
+  projectsById
+  projectIdByThreadId
+  migrationCommitsByKey
+```
+
+这样可以在不引入第二套数据库或锁协议的情况下先建立稳定 `projectId`，同时继续输出
+`sessionFolders` 兼容投影。生命周期对象完成按 `projectId` 迁移后，再按数据量拆分为：
 
 ```text
 projects-v2/
@@ -118,7 +130,8 @@ projects-v2/
     audit.jsonl
 ```
 
-迁移完成前继续读取现有 `sessionFolders` 和 `projectLifecycleByName`；所有新写入使用 V2，同时维护只读兼容投影。稳定一个发布周期后再停止 V1 写入。
+迁移完成前继续读取现有 `sessionFolders` 和 `projectLifecycleByName`；所有新项目身份和对话
+归属写入 V2，同时维护 V1 兼容投影。稳定一个发布周期后再停止 V1 写入。
 
 ## 6. API 方向
 
@@ -136,7 +149,10 @@ project/conversation/detach
 project/lifecycle/get
 ```
 
-请求使用 `*Params`，响应使用 `*Response`；列表必须支持游标分页。文件系统路径由网关规范化并验证 allowed roots。
+当前方法通过网关 WebSocket RPC 暴露；`project/list` 支持游标分页。文件系统路径由网关规范化并验证 allowed roots。
+
+第一阶段已实现：项目列表、读取、创建、更新、归档，迁移预览/提交，以及对话显式绑定、
+解绑和列表。`project/lifecycle/get` 仍沿用名称兼容层，属于下一阶段的生命周期 ID 化工作。
 
 ## 7. 现有数据迁移
 

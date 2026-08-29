@@ -64,6 +64,12 @@ fn default_ui_state_value() -> Value {
             "webhookFailures": []
         },
         "sessionFoldersByName": {},
+        "projectRegistry": {
+            "schemaVersion": 2,
+            "projectsById": {},
+            "projectIdByThreadId": {},
+            "migrationCommitsByKey": {}
+        },
         "projectLifecycleByName": {},
         "sessionMetaByThreadId": {},
         "savedSessionFilters": [],
@@ -188,6 +194,33 @@ fn ensure_ui_state_sections(ui_state: &mut Value) {
         };
         if !is_valid {
             root.insert(key.to_string(), default_value);
+        }
+    }
+
+    if !root.get("projectRegistry").is_some_and(Value::is_object) {
+        root.insert(
+            "projectRegistry".to_string(),
+            json!({
+                "schemaVersion": 2,
+                "projectsById": {},
+                "projectIdByThreadId": {},
+                "migrationCommitsByKey": {}
+            }),
+        );
+    }
+    if let Some(registry) = root
+        .get_mut("projectRegistry")
+        .and_then(Value::as_object_mut)
+    {
+        registry.insert("schemaVersion".to_string(), json!(2));
+        for key in [
+            "projectsById",
+            "projectIdByThreadId",
+            "migrationCommitsByKey",
+        ] {
+            if !registry.get(key).is_some_and(Value::is_object) {
+                registry.insert(key.to_string(), json!({}));
+            }
         }
     }
 }
@@ -803,6 +836,7 @@ pub(crate) fn session_folders_from_ui_state(ui_state: &Value) -> Vec<Value> {
             folders.insert(
                 name.to_string(),
                 json!({
+                    "projectId": entry.get("projectId").cloned().unwrap_or(Value::Null),
                     "name": name,
                     "pinned": entry.get("pinned").and_then(Value::as_bool).unwrap_or(false),
                     "sessionCount": counts.get(name).copied().unwrap_or(0),
@@ -823,6 +857,7 @@ pub(crate) fn session_folders_from_ui_state(ui_state: &Value) -> Vec<Value> {
     for (name, count) in counts {
         folders.entry(name.clone()).or_insert_with(|| {
             json!({
+                "projectId": Value::Null,
                 "name": name,
                 "pinned": false,
                 "sessionCount": count,

@@ -511,6 +511,44 @@ pub(crate) async fn execute_ws_method(
         "sessionFolders/delete" => delete_session_folder_payload(state, &auth.profile_id, params)
             .await
             .map_err(anyhow::Error::from),
+        "project/list" => list_projects_v2_payload(state, &auth.profile_id, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "project/get" => get_project_v2_payload(state, &auth.profile_id, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "project/create" => create_project_v2_payload(state, &auth.profile_id, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "project/update" => update_project_v2_payload(state, &auth.profile_id, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "project/archive" => archive_project_v2_payload(state, &auth.profile_id, params)
+            .await
+            .map_err(anyhow::Error::from),
+        "project/import/preview" => preview_project_import_v2_payload(state, &auth.profile_id)
+            .await
+            .map_err(anyhow::Error::from),
+        "project/import/commit" => {
+            commit_project_import_v2_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        "project/conversation/list" => {
+            list_project_conversations_v2_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        "project/conversation/attach" => {
+            attach_project_conversation_v2_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        "project/conversation/detach" => {
+            detach_project_conversation_v2_payload(state, &auth.profile_id, params)
+                .await
+                .map_err(anyhow::Error::from)
+        }
         "projectLifecycle/get" => get_project_lifecycle_payload(state, &auth.profile_id, params)
             .await
             .map_err(anyhow::Error::from),
