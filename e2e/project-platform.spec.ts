@@ -162,7 +162,11 @@ test("opens a project folder into release and operations workspaces", async ({ p
 });
 
 test("runs the real ForgeOS repository build through gateway validation and records audit", async ({ page }) => {
-  test.setTimeout(600_000);
+  // A cold Windows runner can spend more than eight minutes compiling the
+  // release gateway before the frontend regression check begins. Keep the
+  // client-side acceptance budget below the server's 30-minute run limit,
+  // while allowing the two real project commands to finish.
+  test.setTimeout(1_200_000);
   await login(page);
 
   const repositoryRoot = process.cwd();
@@ -220,7 +224,7 @@ test("runs the real ForgeOS repository build through gateway validation and reco
     }>(page, "projectLifecycle/validation/run", {
       projectId,
       expectedRevision: configured.result?.revision
-    }, 480_000);
+    }, 900_000);
     expect(validated.ok, validated.error).toBeTruthy();
     const run = validated.result?.validation.runs[0];
     expect(run?.status).toBe("passed");
